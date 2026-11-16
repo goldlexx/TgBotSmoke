@@ -1,0 +1,4 @@
+aiogram==3.32.0
+APScheduler==3.11.3
+python-dotenv==1.2.4
+tzdata==2026.6
