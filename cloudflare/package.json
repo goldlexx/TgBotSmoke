@@ -1,0 +1,6 @@
+{
+  "name": "tgbot-smoke", "private": true, "type": "module",
+  "scripts": {"test": "node --test tests/*.test.js", "deploy": "wrangler deploy", "dev": "wrangler dev"},
+  "dependencies": {"decimal.js": "10.6.0", "@js-temporal/polyfill": "0.5.1"},
+  "devDependencies": {"wrangler": "4.163.0"}
+}

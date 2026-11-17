@@ -15,3 +15,7 @@ data/
 .vscode/
 *.pem
 *.key
+node_modules/
+.wrangler/
+backups/
+cloudflare/private/
