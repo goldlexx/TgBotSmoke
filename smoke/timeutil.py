@@ -7,6 +7,10 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def minute(value: datetime) -> datetime:
+    return value.astimezone(UTC).replace(second=0, microsecond=0)
+
+
 def stamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds")
 
@@ -36,7 +40,7 @@ def clock(value: str) -> str:
 def local_input(value: str, zone: str, now: datetime | None = None) -> datetime:
     now = now or utcnow()
     if value.casefold() in {"сейчас", "только что"}:
-        return now
+        return minute(now)
     tz = ZoneInfo(zone)
     parsed = None
     for fmt in ("%d.%m.%Y %H:%M %z", "%d.%m.%Y %H:%M"):

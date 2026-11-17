@@ -39,6 +39,8 @@ class Reports:
                     local_date = due_date(user, now)
                     if not local_date or now < self.retry_at.get(user_id, now):
                         continue
+                    if self.db.report_processed(user_id, local_date):
+                        continue
                     self.db.awards(user_id, now)
                     # Сначала готовим текст, чтобы локальная ошибка не занимала слот отправки.
                     text = report(self.db.streaks(user_id), now, datetime.fromisoformat(local_date).date(), user_id, morning=True)

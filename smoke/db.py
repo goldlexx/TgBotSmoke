@@ -3,8 +3,9 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from .timeutil import instant, stamp, utcnow
+from .timeutil import instant, minute, stamp, utcnow
 
 MILESTONES = (1, 3, 7, 14, 30, 60, 90, 180, 365)
 PROFILE_FIELDS = {"daily", "price", "currency", "pack", "minutes", "timezone", "report_time"}
@@ -90,7 +91,16 @@ class Database:
                     (user_id, days, stamp(earned)),
                 )
 
-    def register(self, user_id: int, chat_id: int, profile: dict, start: datetime):
+    @staticmethod
+    def _skip_due_report(con, user_id: int, profile, now: datetime):
+        local = now.astimezone(ZoneInfo(profile["timezone"]))
+        if local.strftime("%H:%M") >= profile["report_time"]:
+            con.execute(
+                "INSERT OR IGNORE INTO reports VALUES (?,?,'skipped',?)",
+                (user_id, local.date().isoformat(), stamp(now)),
+            )
+
+    def register(self, user_id: int, chat_id: int, profile: dict, start: datetime, now: datetime | None = None):
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             con.execute(
@@ -99,6 +109,8 @@ class Database:
                 (user_id, chat_id, *(profile[f] for f in ("daily", "price", "currency", "pack", "minutes", "timezone", "report_time"))),
             )
             self._new_streak(con, user_id, start, profile)
+            # Стартовый отчёт заменяет уже прошедшую сегодняшнюю рассылку.
+            self._skip_due_report(con, user_id, profile, now or utcnow())
 
     def streaks(self, user_id: int):
         with self.connect() as con:
@@ -119,28 +131,40 @@ class Database:
             con.execute("BEGIN IMMEDIATE")
             active = con.execute("SELECT * FROM streaks WHERE user_id=? AND end IS NULL", (user_id,)).fetchone()
             if field == "start":
-                value = stamp(value)
+                value = minute(value)
+                if value > minute(now):
+                    raise ValueError("Последняя сигарета не может быть в будущем.")
                 previous = con.execute("SELECT MAX(end) FROM streaks WHERE user_id=? AND end IS NOT NULL", (user_id,)).fetchone()[0]
-                if previous and value < previous:
+                if previous and value < minute(instant(previous)):
                     raise ValueError("Дата не может быть раньше окончания предыдущей серии.")
+                if previous:
+                    value = max(value, instant(previous))
+                value = stamp(value)
             self._award(con, user_id, active, now)
             if field == "start":
                 con.execute("UPDATE streaks SET start=? WHERE id=? AND user_id=?", (value, active["id"], user_id))
             else:
                 con.execute(f"UPDATE users SET {field}=? WHERE user_id=?", (value, user_id))
+                if field in {"report_time", "timezone"}:
+                    profile = con.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+                    self._skip_due_report(con, user_id, profile, now)
                 if field in {"daily", "price", "currency", "pack", "minutes"}:
                     con.execute(f"UPDATE streaks SET {field}=? WHERE id=? AND user_id=?", (value, active["id"], user_id))
 
     def lapse(self, user_id: int, streak_id: int, began: datetime, last: datetime):
-        if last < began or last > utcnow():
+        began, last = minute(began), minute(last)
+        if last < began or last > minute(utcnow()):
             raise ValueError("Последняя сигарета должна быть не раньше начала срыва и не в будущем.")
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             active = con.execute("SELECT * FROM streaks WHERE user_id=? AND end IS NULL", (user_id,)).fetchone()
             if active["id"] != streak_id:
                 raise ValueError("Серия уже изменилась. Откройте настройки заново.")
-            if began < instant(active["start"]):
+            if began < minute(instant(active["start"])):
                 raise ValueError("Начало срыва не может быть раньше начала текущей серии.")
+            # Старые записи могли содержать секунды; период не должен стать отрицательным.
+            began = max(began, instant(active["start"]))
+            last = max(last, began)
             self._award(con, user_id, active, began)
             con.execute("UPDATE streaks SET end=? WHERE id=? AND user_id=?", (stamp(began), streak_id, user_id))
             profile = dict(con.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone())
@@ -155,11 +179,20 @@ class Database:
             con.execute("UPDATE users SET price=?,currency=? WHERE user_id=?", args)
             con.execute("UPDATE streaks SET price=?,currency=? WHERE user_id=? AND end IS NULL", args)
 
+    def report_processed(self, user_id: int, local_date: str) -> bool:
+        with self.connect() as con:
+            return con.execute(
+                "SELECT 1 FROM reports WHERE user_id=? AND local_date=? AND status != 'retry'",
+                (user_id, local_date),
+            ).fetchone() is not None
+
     def claim_report(self, user_id: int, local_date: str) -> bool:
         # Резервируем ДО сетевого запроса: неизвестный результат отправки не повторяем.
         with self.connect() as con:
             return con.execute(
-                "INSERT OR IGNORE INTO reports VALUES (?,?,'reserved',?)",
+                "INSERT INTO reports VALUES (?,?,'reserved',?) "
+                "ON CONFLICT(user_id,local_date) DO UPDATE SET status='reserved',created_at=excluded.created_at "
+                "WHERE reports.status='retry'",
                 (user_id, local_date, stamp(utcnow())),
             ).rowcount == 1
 
@@ -169,7 +202,7 @@ class Database:
 
     def release_report(self, user_id: int, local_date: str):
         with self.connect() as con:
-            con.execute("DELETE FROM reports WHERE user_id=? AND local_date=? AND status='reserved'", (user_id, local_date))
+            con.execute("UPDATE reports SET status='retry' WHERE user_id=? AND local_date=? AND status='reserved'", (user_id, local_date))
 
     def fsm_get(self, key: str):
         with self.connect() as con:

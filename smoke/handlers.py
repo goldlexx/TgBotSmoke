@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from html import escape
 from zoneinfo import ZoneInfo
@@ -17,7 +17,7 @@ from . import ui
 from .db import Database, MILESTONES
 from .medical import ADDICTION, HEALTH_NOTE, MODEL_NOTE, STAGES, stage_line
 from .stats import calculate, duration, report
-from .timeutil import clock, instant, local_input, stamp, timezone_name, utcnow
+from .timeutil import clock, instant, local_input, minute, stamp, timezone_name, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,24 @@ def parse_field(field: str, text: str, zone: str):
 
 async def prompt(message: Message, field: str):
     await message.answer(ui.PROMPTS[field], reply_markup=ui.choices(field))
+
+
+def validate_registration_date(text: str, now: datetime):
+    parsed = None
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M %z"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            pass
+    if parsed is None:
+        raise ValueError("Введите дату ДД.ММ.ГГГГ ЧЧ:ММ или нажмите «Сейчас».")
+    if parsed.year < 1900:
+        raise ValueError("Укажите дату начиная с 1900 года.")
+    # Без пояса отклоняем только даты, будущие даже в самом восточном поясе.
+    earliest = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC) - timedelta(hours=14)
+    if minute(earliest) > minute(now):
+        raise ValueError("Последняя сигарета не может быть в будущем.")
 
 
 def build_router(db: Database) -> Router:
@@ -174,21 +192,12 @@ def build_router(db: Database) -> Router:
             if mode == "register":
                 draft = data["draft"]
                 if field == "start" and not data.get("date_final"):
-                    # Пояс узнаем позже; фиксируем «сейчас» сразу, дату пока проверяем только синтаксически.
+                    # Пояс узнаем позже; окончательная проверка будет после его выбора.
                     if text.casefold() in {"сейчас", "только что"}:
-                        draft["start"] = stamp(utcnow())
+                        draft["start"] = stamp(minute(utcnow()))
                         draft.pop("start_input", None)
                     else:
-                        valid = False
-                        for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M %z"):
-                            try:
-                                datetime.strptime(text, fmt)
-                                valid = True
-                                break
-                            except ValueError:
-                                pass
-                        if not valid:
-                            raise ValueError("Введите дату ДД.ММ.ГГГГ ЧЧ:ММ или нажмите «Сейчас».")
+                        validate_registration_date(text, utcnow())
                         draft["start_input"] = text
                 elif field == "start":
                     draft["start"] = parse_field(field, text, draft["timezone"])
@@ -227,13 +236,13 @@ def build_router(db: Database) -> Router:
                 if field == "lapse_begin":
                     began = parse_field(field, text, zone)
                     active = db.streaks(message.from_user.id)[-1]
-                    if instant(began) < instant(active["start"]):
+                    if minute(instant(began)) < minute(instant(active["start"])):
                         raise ValueError("Начало срыва не может быть раньше начала текущей серии.")
                     await state.update_data(began=began, field="lapse_last")
                     await prompt(message, "lapse_last")
                 else:
                     last = data["began"] if text == "Одна сигарета" else parse_field(field, text, zone)
-                    if instant(last) < instant(data["began"]):
+                    if minute(instant(last)) < minute(instant(data["began"])):
                         raise ValueError("Последняя сигарета должна быть не раньше начала срыва.")
                     nonce = uuid4().hex
                     await state.update_data(last=last, nonce=nonce)

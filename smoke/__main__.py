@@ -27,6 +27,7 @@ def instance_lock(path: str):
     lock_path = Path(path + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
         if handle.tell() == 0:
             handle.write(b"0")
             handle.flush()
