@@ -19,3 +19,10 @@ node_modules/
 .wrangler/
 backups/
 cloudflare/private/
+.dev.vars
+.dev.vars.*
+*.sql
+!cloudflare/migrations/*.sql
+*.dump
+*.bak
+*.backup
