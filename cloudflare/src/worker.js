@@ -1,5 +1,5 @@
 import {Database} from './db.js';
-import {local,stamp,report,menu} from './core.js';
+import {local,stamp,report,reportButtons} from './core.js';
 import {handleUpdate,telegram,DeliveryError} from './bot.js';
 
 export async function tick(env,now=Date.now(),api=telegram) {
@@ -22,7 +22,7 @@ export async function tick(env,now=Date.now(),api=telegram) {
       if(!await db.claim(u.user_id,l.day,now))continue;
       sent++;
       let status='sent',retry=0;
-      try {await api(env,'sendMessage',{chat_id:u.chat_id,text,parse_mode:'HTML',reply_markup:menu(),link_preview_options:{is_disabled:true}});}
+      try {await api(env,'sendMessage',{chat_id:u.chat_id,text,parse_mode:'HTML',reply_markup:reportButtons(),link_preview_options:{is_disabled:true}});}
       catch(e) {
         if(e instanceof DeliveryError&&e.code===429) {status='retry';retry=now+(e.retry+1)*1000;}
         else if(e instanceof DeliveryError&&e.code===403)status='blocked';

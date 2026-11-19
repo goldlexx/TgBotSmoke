@@ -1,4 +1,4 @@
-import {A,esc,minute,local,stamp,parseDate,parseField,calculate,duration,report,stageLine,menu,choices,settings,confirmation,original,milestones} from './core.js';
+import {A,esc,minute,local,stamp,parseDate,parseField,calculate,report,reportButtons,healthReport,methodologyReport,menu,choices,settings,confirmation,original,milestones} from './core.js';
 export class DeliveryError extends Error {constructor(code,retry=0){super(`Telegram ${code}`);this.code=code;this.retry=retry;}}
 export async function telegram(env,method,body) {
   // Never propagate fetch errors: they may contain the token-bearing URL.
@@ -29,6 +29,8 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     const remove=()=>api(env,'editMessageReplyMarkup',{chat_id:m.chat.id,message_id:m.message_id,reply_markup:{inline_keyboard:[]}});
     if(cb.data==='cancel') {await clear();await remove();return send('Отменено.',menu());}
     if(!user) return send('Сначала /start.');
+    if(cb.data==='report:health') return send(healthReport(calculate(await db.streaks(id),now).current_seconds));
+    if(cb.data==='report:methodology') return send(methodologyReport());
     if(cb.data.startsWith('edit:')) {
       const field=cb.data.split(':')[1];if(!A.FIELDS.includes(field))return;
       await save({state:'Form:value',mode:'edit',field,timezone:user.timezone});await prompt(field);
@@ -57,6 +59,10 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   }
   if(text==='Отмена'||(text&&/^\/cancel(?:@\w+)?(?:\s|$)/.test(text))) {
     await clear();return send(user?'Ввод отменён.':'Ввод отменён. Начать регистрацию: /start',user?menu():{remove_keyboard:true});
+  }
+  if(text&&/^\/morning(?:@\w+)?$/.test(text)) {
+    if(!user) return send('Сначала /start.');
+    return send(report(await db.streaks(id),now,local(now,user.timezone).day,id,true),reportButtons());
   }
   if(data.state==='Form:value') {
     if(!text) return send('Нужен текст или кнопка с ответом.');
@@ -101,8 +107,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   if([A.MENU_LABELS[1],A.MENU_LABELS[2],A.MENU_LABELS[4]].includes(text)&&!user) return send('Сначала /start.');
   if(text===A.MENU_LABELS[1]) {
     const sec=calculate(await db.streaks(id),now).current_seconds;
-    const lines=['<b>🫁 Моё здоровье</b>',stageLine(sec),'','<b>Календарь восстановления</b>',...A.STAGES.map(s=>`${sec<s.seconds?'•':'✓'} ${s.label}: ${s.text} <a href="${s.source}">Источник</a>`),'',A.HEALTH_NOTE,'',`<i>${A.MODEL_NOTE}</i> <a href="${A.ADDICTION}">Исследование</a>`];
-    return send(lines.join('\n'));
+    return send(healthReport(sec));
   }
   if(text===A.MENU_LABELS[2]) {
     const awards=new Set((await db.awards(id,now)).map(a=>a.days)),sec=calculate(await db.streaks(id),now).current_seconds;

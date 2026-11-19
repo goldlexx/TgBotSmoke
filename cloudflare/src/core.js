@@ -78,11 +78,62 @@ export function duration(seconds) {
   return `${Math.floor(m/1440)} дн. ${Math.floor(m%1440/60)} ч. ${m%60} мин.`;
 }
 const number = n => n.toFixed(2,Decimal.ROUND_HALF_UP).replace(/\B(?=(\d{3})+(?!\d))/g,' ').replace('.',',');
+const integer = n => n.toFixed(0,Decimal.ROUND_HALF_UP).replace(/\B(?=(\d{3})+(?!\d))/g,' ');
+const plural = (n,one,few,many) => n%10===1&&n%100!==11?one:n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?few:many;
+export function compactDuration(seconds,words=false) {
+  const minutes=Math.floor(Math.max(0,seconds)/60),days=Math.floor(minutes/1440),hours=Math.floor(minutes%1440/60);
+  const parts=[];
+  if(days) parts.push(`${days} ${words?plural(days,'день','дня','дней'):'дн.'}`);
+  if(hours) parts.push(`${hours} ${words?plural(hours,'час','часа','часов'):'ч.'}`);
+  if(!days&&minutes%60) parts.push(`${minutes%60} ${words?plural(minutes%60,'минута','минуты','минут'):'мин.'}`);
+  return parts.join(' ')||'меньше минуты';
+}
+export function morningReport(streaks,now) {
+  // One supplied instant for the series, target and all model estimates.
+  const s=calculate(streaks,now);
+  const next=milestones.find(d=>s.current_seconds<d*86400)??(Math.floor(s.current_seconds/(365*86400))+1)*365;
+  const ratio=Math.max(0,Math.min(1,s.current_seconds/(next*86400)));
+  const filled=Math.min(10,Math.floor(ratio*10)),percent=Math.min(100,Math.floor(ratio*100));
+  const symbols={RUB:'₽',USD:'$',EUR:'€'};
+  const money=Object.entries(s.money).map(([currency,value])=>`${integer(value)} ${esc(symbols[currency]||currency)}`).join(' + ')||'0';
+  return `🚭 <b>${compactDuration(s.current_seconds,true)} без сигарет</b>\n\n`+
+    `🎯 До ${next} ${plural(next,'дня','дней','дней')} — ${compactDuration(next*86400-s.current_seconds,true)}\n`+
+    `${'▓'.repeat(filled)}${'░'.repeat(10-filled)} ${percent}%\n\n`+
+    `🚬 Не выкурено: ~${integer(s.cigarettes)} шт.\n`+
+    `💰 Сэкономлено: ~${money}\n`+
+    `⏳ Без перекуров: ~${compactDuration(s.free_minutes.mul(60).toNumber())}`;
+}
+export const reportButtons=()=>({inline_keyboard:[[
+  {text:'🫁 Здоровье',callback_data:'report:health'},
+  {text:'ℹ️ Методика',callback_data:'report:methodology'}
+]]});
+export function healthReport(seconds) {
+  const reached=A.STAGES.filter(s=>seconds>=s.seconds),next=A.STAGES.find(s=>seconds<s.seconds);
+  const line=s=>`${s.label}: ${s.text} <a href="${s.source}">Источник</a>`;
+  return ['<b>🫁 Здоровье</b>','Ориентиры по длительности текущей серии; наступление изменений у вас не измеряется.','',
+    '<b>Достигнутые временные ориентиры</b>',...reached.map(s=>'✓ '+line(s)),
+    ...(!reached.length?['Пока нет достигнутых ориентиров.']:[]),'','<b>Ближайший ориентир</b>',
+    next?line(next):'Все ориентиры календаря пройдены по времени.','',A.HEALTH_NOTE].join('\n');
+}
+export function methodologyReport() {
+  return ['<b>ℹ️ Методика</b>',
+    'Все показатели отчёта рассчитаны на один момент времени. Текущая серия — время с последней сигареты; после срыва начинается заново. Цель — следующий этап текущей серии, шкала — доля времени от её начала до цели.',
+    'Не выкурено ≈ сумма (секунды без курения / 86 400 × прежние сигареты в день).',
+    'Сэкономлено ≈ сумма (не выкурено × цена пачки / сигарет в пачке). Валюты учитываются отдельно, без конвертации.',
+    'Без перекуров ≈ сумма (не выкурено × прежние минуты на сигарету).',
+    'Суммы учитывают все бездымные периоды; промежутки срыва исключены. Завершённые периоды сохраняют свои параметры. Изменение расхода, цены и длительности пересчитывает текущую серию.',
+    'Сигареты и деньги округляются до целых только при показе утром. Время показывается без нулевых частей, от суток — дни и часы без минут. Полные показатели: «📊 Мой прогресс».',
+    'Это статистические оценки по прежним привычкам, а не измерение фактических покупок, состояния здоровья или личной продолжительности жизни.','',
+    A.MODEL_NOTE+` <a href="${A.ADDICTION}">Исследование</a>`,'',A.HEALTH_NOTE,'',
+    '<b>Источники медицинских ориентиров</b>',...Array.from(new Set(A.STAGES.map(s=>s.source))).map(url=>`<a href="${url}">${new URL(url).hostname}</a>`)
+  ].join('\n\n');
+}
 export function stageLine(sec) {
   const s=A.STAGES.findLast(s=>sec>=s.seconds);
   return s?`${s.label}: ${s.text} <a href="${s.source}">Источник</a>`:'Первые изменения начинаются вскоре после отказа. Ближайший ориентир — около 20 минут.';
 }
 export function report(streaks,now,day,id,morning=false) {
+  if(morning) return morningReport(streaks,now);
   const s=calculate(streaks,now), index=Math.floor(Date.parse(day)/86400000)+719163+id;
   const title=morning?A.GREETINGS[index%A.GREETINGS.length]:'Ваш прогресс';
   const money=Object.entries(s.money).map(([k,v])=>`${number(v)} ${esc(k)}`).join(' + ');
