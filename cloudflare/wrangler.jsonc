@@ -4,6 +4,8 @@
   "main": "src/worker.js",
   "account_id": "e9648642771612b9c00aaa73c74f3020",
   "compatibility_date": "2026-11-17",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "vars": {"WORKER_ORIGIN":"https://tgbot-smoke.rustik-yuldashev.workers.dev"},
   "workers_dev": true,
   "preview_urls": false,
   "observability": {"enabled": false},

@@ -80,7 +80,7 @@ class DatabaseCase(unittest.TestCase):
         first = report(self.db.streaks(1), now, now.date(), 1, True)
         second = report(self.db.streaks(1), now, (now + timedelta(days=1)).date(), 1, True)
         self.assertNotEqual(first, second)
-        self.assertIn("а не обещание", first)
+        self.assertIn("не персонально возвращённые годы", first)
         self.assertLess(len(first), 4096)
 
     def test_registration_and_schedule_changes_skip_only_due_day(self):
@@ -122,8 +122,8 @@ class DatabaseCase(unittest.TestCase):
             boundary = now - timedelta(minutes=minutes)
             self.db.lapse(1, self.db.streaks(1)[-1]["id"], boundary, boundary)
         text = report(self.db.streaks(1), now, now.date(), 1)
-        self.assertIn("Без перекуров: ≈ 0 дн. 0 ч. 2 мин.", text)
-        self.assertIn("Статистический эквивалент: ≈ 0 дн. 0 ч. 2 мин.", text)
+        self.assertIn("Освобождено времени: ≈ 0 дн. 0 ч. 2 мин.", text)
+        self.assertIn("Популяционный эквивалент потери ожидаемой жизни: ≈ 0 дн. 0 ч. 2 мин.", text)
 
     def test_lock_file_stays_one_byte(self):
         path = str(Path(self.temp.name) / "bot.sqlite3")

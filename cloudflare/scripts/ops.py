@@ -16,11 +16,11 @@ from dotenv import dotenv_values
 
 ACCOUNT = "e9648642771612b9c00aaa73c74f3020"
 DATABASE = "0368b28f-dc56-464c-a8a9-b6db823ea14d"
-def cf(path, body=None):
+def cf(path, body=None, method=None):
     config = Path(os.environ["APPDATA"]) / "xdg.config/.wrangler/config/default.toml"
     token = tomllib.loads(config.read_text(encoding="utf-8"))["oauth_token"]
-    req = urllib.request.Request("https://api.cloudflare.com/client/v4" + path, data=json.dumps(body).encode() if body is not None else None, headers={"Authorization": "Bearer " + token, "Content-Type":"application/json"})
-    with urllib.request.urlopen(req) as r:
+    req = urllib.request.Request("https://api.cloudflare.com/client/v4" + path, data=json.dumps(body).encode() if body is not None else None, headers={"Authorization": "Bearer " + token, "Content-Type":"application/json"}, method=method)
+    with urllib.request.urlopen(req, timeout=90) as r:
         data = json.load(r)
     if not data["success"]: raise RuntimeError("Cloudflare request failed")
     return data["result"]

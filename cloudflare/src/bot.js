@@ -1,4 +1,4 @@
-import {A,esc,minute,local,stamp,parseDate,parseField,calculate,report,reportButtons,healthReport,methodologyReport,menu,choices,settings,confirmation,original,milestones} from './core.js';
+import {A,esc,minute,local,stamp,parseDate,parseField,calculate,report,reportButtons,healthReport,methodologyReport,menu,choices,settings,confirmation,original,milestones,DEFAULTS,PRIVACY,ValidationError} from './core.js';
 export class DeliveryError extends Error {constructor(code,retry=0){super(`Telegram ${code}`);this.code=code;this.retry=retry;}}
 export async function telegram(env,method,body) {
   // Never propagate fetch errors: they may contain the token-bearing URL.
@@ -7,7 +7,7 @@ export async function telegram(env,method,body) {
   catch {throw new DeliveryError(0);}
   let data;
   try {data=await response.json();} catch {throw new DeliveryError(0);}
-  if(!data.ok) throw new DeliveryError(data.error_code||response.status,data.parameters?.retry_after||0);
+  if(!response.ok||!data.ok) throw new DeliveryError(data.error_code||response.status,data.parameters?.retry_after||0);
   return data.result;
 }
 export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
@@ -21,14 +21,38 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   const clear=()=>save({});
   const progress=async()=> {
     if(!user) return send('Для начала ответьте на вопросы: /start');
-    await db.awards(id,now);
-    return send(report(await db.streaks(id),now,local(now,user.timezone).day,id),menu());
+    const streaks=await db.streaks(id);
+    await db.batch(db.awardStatements(id,streaks,now));
+    return send(report(streaks,now,local(now,user.timezone).day,id),menu());
   };
   if(cb) {
-    await api(env,'answerCallbackQuery',{callback_query_id:cb.id});
-    const remove=()=>api(env,'editMessageReplyMarkup',{chat_id:m.chat.id,message_id:m.message_id,reply_markup:{inline_keyboard:[]}});
+    try {await api(env,'answerCallbackQuery',{callback_query_id:cb.id});}catch{}
+    const remove=async()=>{try {await api(env,'editMessageReplyMarkup',{chat_id:m.chat.id,message_id:m.message_id,reply_markup:{inline_keyboard:[]}});}catch{}};
     if(cb.data==='cancel') {await clear();await remove();return send('Отменено.',menu());}
+    if(cb.data==='privacy')return send(PRIVACY);
+    if(cb.data.startsWith('delete:confirm:')) {
+      if(data.state!=='Form:delete'||cb.data.split(':').at(-1)!==data.nonce)return send('Подтверждение устарело. Для удаления используйте /delete.');
+      await db.deleteAccount(id,botId,db.subject,now);
+      return send('Данные удалены, утренние отчёты отключены. Сообщения в Telegram остаются; резервные копии удаляются владельцем отдельно, история восстановления D1 — до 7 дней. Старые события не восстановят аккаунт. Начать заново можно только новой командой /start.',{remove_keyboard:true});
+    }
+    if(cb.data.startsWith('register:')) {
+      if(user||data.state!=='Form:register'||cb.data.split(':').at(-1)!==data.nonce)return send('Эта регистрация уже обработана. Используйте /start.');
+      if(cb.data.startsWith('register:custom:')) {
+        await save({...data,state:'Form:value',mode:'register',field:'daily',remaining:A.FIELDS.slice(2)});
+        return prompt('daily');
+      }
+      if(!cb.data.startsWith('register:confirm:'))return;
+      const draft={...data.draft};
+      try {if(draft.start_input){draft.start=parseDate(draft.start_input,draft.timezone,now);delete draft.start_input;}}
+      catch(e){if(!(e instanceof ValidationError))throw e;return send(esc(e.message)+' Выберите точную настройку, чтобы указать часовой пояс.');}
+      await db.register(id,m.chat.id,draft,now);user=await db.user(id);await clear();
+      await send('Готово! Все значения можно изменить в настройках.',menu());return progress();
+    }
     if(!user) return send('Сначала /start.');
+    if(['notify:on','notify:off'].includes(cb.data)) {
+      await db.notifications(id,cb.data==='notify:on',now);
+      return send(cb.data==='notify:on'?'Утренние отчёты включены. Следующая отправка — в выбранное время, начиная со следующего подходящего дня.':'Утренние отчёты выключены. Прогресс остаётся доступен в меню.',settings(cb.data==='notify:on'));
+    }
     if(cb.data==='report:health') return send(healthReport(calculate(await db.streaks(id),now).current_seconds));
     if(cb.data==='report:methodology') return send(methodologyReport());
     if(cb.data.startsWith('edit:')) {
@@ -39,23 +63,34 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     }
     if(cb.data==='lapse') {
       const active=(await db.streaks(id)).at(-1);
-      await save({state:'Form:value',mode:'lapse',field:'lapse_begin',timezone:user.timezone,streak_id:active.id});
-      await send(original('Срыв не стирает')+`Ваш часовой пояс: ${esc(user.timezone)}.`);return prompt('lapse_begin');
+      const nonce=crypto.randomUUID().replaceAll('-','');
+      await save({state:'Form:confirm',mode:'lapse',timezone:user.timezone,streak_id:active.id,began:stamp(minute(now)),last:stamp(minute(now)),nonce});
+      const markup=confirmation(nonce);markup.inline_keyboard.push([{text:'Указать другое время / несколько сигарет',callback_data:`lapse:other:${nonce}`}]);
+      return send('Одна сигарета сейчас? После подтверждения начнётся новая серия. Прежние результаты сохранятся. Можно продолжить без самокритики.',markup);
+    }
+    if(cb.data.startsWith('lapse:other:')) {
+      if(data.state!=='Form:confirm'||data.mode!=='lapse'||cb.data.split(':').at(-1)!==data.nonce)return send('Эта отметка уже обработана или отменена.');
+      await save({...data,state:'Form:value',field:'lapse_begin'});return prompt('lapse_begin');
     }
     if(cb.data.startsWith('lapse:confirm:')) {
       if(data.state!=='Form:confirm'||data.mode!=='lapse'||cb.data.split(':').at(-1)!==data.nonce) return send('Эта отметка уже обработана или отменена.');
       try {await db.lapse(id,data.streak_id,data.began,data.last,now);await send(original('Новая серия началась'),menu());}
-      catch(e){await send(esc(e.message),menu());}
+      catch(e){if(!(e instanceof ValidationError))throw e;await send(esc(e.message),menu());}
       await clear();await remove();return;
     }
     return;
   }
   const text=m.text?.trim();
+  if(text&&/^\/privacy(?:@\w+)?$/.test(text))return send(PRIVACY);
+  if(text&&/^\/delete(?:@\w+)?$/.test(text)) {
+    const nonce=crypto.randomUUID().replaceAll('-','');await save({state:'Form:delete',nonce});
+    return send('Удалить все ваши данные? Будут удалены настройки, серии, срывы, достижения и очередь отправок. Отчёты прекратятся; вернуть историю через бота нельзя. Сообщения в Telegram останутся. Резервные копии удаляются владельцем отдельно, история восстановления D1 хранится до 7 дней. Для защиты от старых событий останется необратимая метка ID с датой удаления.',{inline_keyboard:[[{text:'Да, удалить мои данные',callback_data:`delete:confirm:${nonce}`}],[{text:'Отмена',callback_data:'cancel'}]]});
+  }
   if(text && /^\/start(?:@\w+)?(?:\s|$)/.test(text)) {
-    if(user) {await db.run('UPDATE users SET enabled=1 WHERE user_id=?',id);await clear();return send(original('🚭 <b>НЕ КУРЮ</b>\nВаш прогресс'),menu());}
+    if(user) {await clear();return send(original('🚭 <b>НЕ КУРЮ</b>\nВаш прогресс'),menu());}
     if(data.state==='Form:value'&&data.mode==='register') {await send(original('Продолжим регистрацию'));return prompt(data.field);}
-    await save({state:'Form:value',mode:'register',field:'start',remaining:A.FIELDS.slice(1),draft:{}});
-    await send(original('🚭 <b>НЕ КУРЮ</b>\nПомогу'));return prompt('start');
+    await save({state:'Form:value',mode:'register',field:'start',remaining:[],draft:{...DEFAULTS}});
+    await send('🚭 Начнём с даты последней сигареты. По умолчанию: 20 сиг./день, пачка 250 RUB / 20 сиг., 5 мин. на сигарету, Europe/Moscow, утренний отчёт 08:00. Перед сохранением можно выбрать точную настройку.\n\n'+PRIVACY);return prompt('start');
   }
   if(text==='Отмена'||(text&&/^\/cancel(?:@\w+)?(?:\s|$)/.test(text))) {
     await clear();return send(user?'Ввод отменён.':'Ввод отменён. Начать регистрацию: /start',user?menu():{remove_keyboard:true});
@@ -82,8 +117,9 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
         if(data.remaining.length) {
           const [next,...remaining]=data.remaining;await save({...data,draft,field:next,remaining});return prompt(next);
         }
-        await db.register(id,m.chat.id,draft,now);user=await db.user(id);await clear();
-        await send(original('Готово! Отсчёт'),menu());return progress();
+        const nonce=crypto.randomUUID().replaceAll('-','');
+        await save({state:'Form:register',mode:'register',draft,nonce});
+        return send(`Проверьте параметры: ${draft.daily} сиг./день; пачка ${draft.price} ${draft.currency}, ${draft.pack} сиг.; ${draft.minutes} мин./сиг.; ${esc(draft.timezone)}; отчёт ${draft.report_time}.\nПоследняя сигарета: ${esc(draft.start_input||local(draft.start,draft.timezone).day+' '+local(draft.start,draft.timezone).clock)}.\nЗначения по умолчанию можно изменить сейчас или позже в настройках.`,{inline_keyboard:[[{text:'Сохранить эти параметры',callback_data:`register:confirm:${nonce}`}],[{text:'Точная настройка всех параметров',callback_data:`register:custom:${nonce}`}],[{text:'Отмена',callback_data:'cancel'}]]});
       }
       if(mode==='edit') {
         await db.change(id,field,parseField(field,text,zone,now),now);await clear();return send(original('Сохранено. Параметры'),menu());
@@ -91,16 +127,16 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       if(mode==='lapse') {
         if(field==='lapse_begin') {
           const began=parseDate(text,zone,now),active=(await db.streaks(id)).at(-1);
-          if(minute(began)<minute(active.start)) throw Error('Начало срыва не может быть раньше начала текущей серии.');
+          if(minute(began)<minute(active.start)) throw new ValidationError('Начало срыва не может быть раньше начала текущей серии.');
           await save({...data,began,field:'lapse_last'});return prompt('lapse_last');
         }
         const last=text==='Одна сигарета'?data.began:parseDate(text,zone,now);
-        if(minute(last)<minute(data.began)) throw Error('Последняя сигарета должна быть не раньше начала срыва.');
+        if(minute(last)<minute(data.began)) throw new ValidationError('Последняя сигарета должна быть не раньше начала срыва.');
         const nonce=crypto.randomUUID().replaceAll('-','');await save({...data,last,nonce,state:'Form:confirm'});
         const fmt=v=>{const l=local(v,zone);return l.day.split('-').reverse().join('.')+' '+l.clock;};
         return send(`Начало срыва: ${fmt(data.began)}\nПоследняя сигарета: ${fmt(last)}\n`+original('Текущая серия начнётся заново'),confirmation(nonce));
       }
-    } catch(e) {if(e instanceof DeliveryError)throw e;return send(esc(e.message));}
+    } catch(e) {if(!(e instanceof ValidationError))throw e;return send(esc(e.message));}
   }
   if(data.state==='Form:confirm') return send(original('Подтвердите запись кнопкой'));
   if(text===A.MENU_LABELS[0]) return progress();
@@ -113,12 +149,12 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     const awards=new Set((await db.awards(id,now)).map(a=>a.days)),sec=calculate(await db.streaks(id),now).current_seconds;
     return send(['<b>🏆 Достижения</b>','Награды за непрерывную серию остаются после срыва.','',...milestones.map(d=>`${d} дн. — ${awards.has(d)?'🏅 сохранено':'🔒 впереди'}${sec>=d*86400?' · есть в текущей серии':''}`)].join('\n'));
   }
-  if(text===A.MENU_LABELS[3]) return send(original('<b>🆘 Переживём'));
+  if(text===A.MENU_LABELS[3]) return send(original('<b>🆘 Переживём'),{inline_keyboard:[[{text:'↩️ Я выкурил(а) сигарету',callback_data:'lapse'}]]});
   if(text===A.MENU_LABELS[4]) {
     const s=(await db.streaks(id)).at(-1),l=local(s.start,user.timezone);
     return send(`<b>⚙️ Настройки</b>\nПоследняя сигарета: ${l.day.split('-').reverse().join('.')} ${l.clock}\n`+
       `Прежний расход: ${user.daily} сиг./день\nПачка: ${user.price} ${user.currency}, ${user.pack} сиг.\n`+
-      `Перекур: ${user.minutes} мин.\nПояс: ${esc(user.timezone)}\nОтчёт: ${user.report_time}`+original('\n\nИзменение расхода, цены'),settings());
+      `Перекур: ${user.minutes} мин.\nПояс: ${esc(user.timezone)}\nОтчёт: ${user.report_time} · ${user.enabled?'включён':'выключен'}`+original('\n\nИзменение расхода, цены'),settings(!!user.enabled));
   }
   return send('Выберите раздел меню или начните с /start.',user?menu():undefined);
 }

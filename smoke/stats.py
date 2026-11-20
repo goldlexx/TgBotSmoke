@@ -69,8 +69,8 @@ def report(streaks: list[dict], now: datetime, local_day, user_id: int, morning:
         f"📅 Всего в учтённых бездымных периодах: {duration(s.total_seconds)}\n"
         f"🚬 Не выкурено, оценка: <b>≈ {number(s.cigarettes)}</b>\n"
         f"💰 Сэкономлено, оценка: <b>≈ {money}</b>\n"
-        f"⏳ Без перекуров: ≈ {duration(int((s.free_minutes * 60).to_integral_value(rounding=ROUND_HALF_UP)))}\n"
-        f"❤️ Статистический эквивалент: ≈ {duration(int((s.life_minutes * 60).to_integral_value(rounding=ROUND_HALF_UP)))}\n"
+        f"⏳ Освобождено времени: ≈ {duration(int((s.free_minutes * 60).to_integral_value(rounding=ROUND_HALF_UP)))}\n"
+        f"❤️ Популяционный эквивалент потери ожидаемой жизни: ≈ {duration(int((s.life_minutes * 60).to_integral_value(rounding=ROUND_HALF_UP)))}\n"
         f'<i>{MODEL_NOTE}</i> <a href="{ADDICTION}">Исследование</a>\n\n'
         f"🫁 <b>Ориентир для текущей серии</b>\n{stage_line(s.current_seconds)}\n"
         f"<i>Сроки индивидуальны, это не медицинская гарантия.</i>\n\n"
