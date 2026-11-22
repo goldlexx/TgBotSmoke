@@ -1,11 +1,13 @@
 import Decimal from 'decimal.js';
 import { Temporal } from '@js-temporal/polyfill';
 import A from './assets.json' with {type: 'json'};
+import {dailyFact} from './health.js';
+export {healthReport} from './health.js';
 Decimal.set({precision: 28, rounding: Decimal.ROUND_HALF_EVEN});
 export { A };
 export class ValidationError extends Error {}
 export const DEFAULTS={daily:20,price:'250',currency:'RUB',pack:20,minutes:'5',timezone:'Europe/Moscow',report_time:'08:00'};
-export const PRIVACY='Сохраняем Telegram ID и ID чата для ответов, настройки курения, даты серий и срывов, достижения и отметки отправки для расчётов и защиты от дублей. Имя, телефон и переписку не сохраняем. Ответы в очереди удаляются после завершения отправки; старые записи очищаются периодически. Удаление: /delete. После удаления остаётся только необратимая метка ID с датой удаления, чтобы старые события не восстановили аккаунт. Резервные копии удаляются владельцем отдельно; история восстановления D1 хранится до 7 дней. Утренний отчёт можно выключить в настройках.';
+export const PRIVACY='Сохраняем Telegram ID и ID чата для ответов, настройки курения, даты серий, время и количество сигарет при записи срыва, достижения и отметки отправки для расчётов и защиты от дублей. Имя, телефон и переписку не сохраняем. Ответы в очереди удаляются после завершения отправки; старые записи очищаются периодически. Удаление: /delete. После удаления остаётся только необратимая метка ID с датой удаления, чтобы старые события не восстановили аккаунт. Резервные копии удаляются владельцем отдельно; история восстановления D1 хранится до 7 дней. Утренний отчёт можно выключить в настройках.';
 export const milestones = [1,3,7,14,30,60,90,180,365];
 export const esc = v => String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#x27;');
 export const minute = value => Math.floor(new Date(value).getTime()/60000)*60000;
@@ -60,7 +62,8 @@ export function parseDate(text,zone,now=Date.now(),provisional=false) {
   if(provisional && !m[6]) ms=Number(p.toZonedDateTime('+14:00').epochMilliseconds);
   else if(m[6]) {
     const offset=m[6].slice(0,3)+':'+m[6].slice(3);
-    ms=Number(p.toZonedDateTime(offset).epochMilliseconds);
+    try {ms=Number(p.toZonedDateTime(offset).epochMilliseconds);}
+    catch {throw new ValidationError('Укажи допустимое смещение UTC, например +0300.');}
     if(!provisional && !Temporal.Instant.fromEpochMilliseconds(ms).toZonedDateTimeISO(zone).toPlainDateTime().equals(p)) throw new ValidationError('Смещение UTC не соответствует выбранному часовому поясу.');
   } else {
     try { ms=Number(p.toZonedDateTime(zone,{disambiguation:'reject'}).epochMilliseconds); }
@@ -82,9 +85,10 @@ export function parseField(field,text,zone,now=Date.now()) {
   if(field==='pack') return numeric(text,1,100,true);
   if(field==='minutes') return numeric(text,'0.1',120);
   if(field==='cost') {
-    const p=text.toUpperCase().replaceAll('₽','RUB').replaceAll('€','EUR').replaceAll('$','USD').split(/\s+/);
-    if(p.length!==2||! /^[A-Z]{3}$/.test(p[1])) throw new ValidationError('Введите цену и валюту через пробел, например 250 RUB или 5,50 EUR.');
-    return {price:numeric(p[0],'0.01',1000000), currency:p[1]};
+    const p=text.toUpperCase().replaceAll('₽',' RUB').replaceAll('€',' EUR').replaceAll('$',' USD').trim().split(/\s+/);
+    const currency=p[1]||DEFAULTS.currency;
+    if(p.length>2||! /^[A-Z]{3}$/.test(currency)) throw new ValidationError('Введи цену и валюту через пробел, например 250 ₽ или 5,50 EUR.');
+    return {price:numeric(p[0],'0.01',1000000), currency};
   }
   if(field==='timezone') {try {local(now,text);} catch {throw new ValidationError('Неизвестный пояс. Пример: Europe/Moscow или Asia/Yekaterinburg.');} return text;}
   if(field==='report_time') {
@@ -109,11 +113,6 @@ export function calculate(streaks,now) {
   s.life_minutes=s.cigarettes.mul(20);
   return s;
 }
-export function duration(seconds) {
-  const m=Math.floor(Math.max(0,seconds)/60);
-  return `${Math.floor(m/1440)} дн. ${Math.floor(m%1440/60)} ч. ${m%60} мин.`;
-}
-const number = n => n.toFixed(2,Decimal.ROUND_HALF_UP).replace(/\B(?=(\d{3})+(?!\d))/g,' ').replace('.',',');
 const integer = n => n.toFixed(0,Decimal.ROUND_HALF_UP).replace(/\B(?=(\d{3})+(?!\d))/g,' ');
 const plural = (n,one,few,many) => n%10===1&&n%100!==11?one:n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?few:many;
 export function compactDuration(seconds,words=false) {
@@ -124,75 +123,101 @@ export function compactDuration(seconds,words=false) {
   if(!days&&minutes%60) parts.push(`${minutes%60} ${words?plural(minutes%60,'минута','минуты','минут'):'мин.'}`);
   return parts.join(' ')||'меньше минуты';
 }
-export function morningReport(streaks,now) {
-  // One supplied instant for the series, target and all model estimates.
-  const s=calculate(streaks,now);
-  const next=milestones.find(d=>s.current_seconds<d*86400)??(Math.floor(s.current_seconds/(365*86400))+1)*365;
-  const previous=milestones.findLast(d=>d*86400<=s.current_seconds)??0;
-  const from=next>365?next-365:previous;
-  const ratio=Math.max(0,Math.min(1,(s.current_seconds-from*86400)/((next-from)*86400)));
-  const filled=Math.min(10,Math.floor(ratio*10)),percent=Math.min(100,Math.floor(ratio*100));
-  const symbols={RUB:'₽',USD:'$',EUR:'€'};
-  const money=Object.entries(s.money).map(([currency,value])=>`${integer(value)} ${esc(symbols[currency]||currency)}`).join(' + ')||'0';
-  return `🚭 <b>${compactDuration(s.current_seconds,true)} без сигарет</b>\n\n`+
-    `🎯 До ${next} ${plural(next,'дня','дней','дней')} — ${compactDuration(next*86400-s.current_seconds,true)}\n`+
-    (from?`✓ Уже достигнуто: ${from} дн.\n`:'')+
-    `Этап ${from} → ${next} дн.: ${'▓'.repeat(filled)}${'░'.repeat(10-filled)} ${percent}%\n\n`+
-    `🚬 Не выкурено: ~${integer(s.cigarettes)} шт.\n`+
-    `💰 Сэкономлено: ~${money}\n`+
-    `⏳ Освобождено времени: ~${compactDuration(s.free_minutes.mul(60).toNumber())}`;
+
+const day=86400;
+const awards={
+  1:['🌱','Первый день','Первый день без сигарет!'],
+  3:['🔥','Три дня','Три дня без сигарет!'],
+  7:['🥉','Первая неделя','Целая неделя без сигарет!'],
+  14:['🥈','Две недели','Две недели без сигарет!'],
+  30:['🥇','Месяц','Месяц без сигарет!'],
+  60:['🎖','Два месяца','Два месяца без сигарет!'],
+  90:['💎','Три месяца','Три месяца без сигарет!'],
+  180:['🌟','Полгода','Полгода без сигарет!'],
+  365:['👑','Год','Целый год без сигарет!']
+};
+const daysText=d=>compactDuration(d*day,true);
+export const currencySymbol=currency=>({RUB:'₽',USD:'$',EUR:'€'})[currency]||currency;
+export const dateLabel=(value,zone)=>{
+  const {day,clock}=local(value,zone);
+  return day.split('-').reverse().join('.')+' '+clock;
+};
+export const zoneLabel=zone=>({
+  'Europe/Moscow':'Москва','Asia/Yekaterinburg':'Екатеринбург','Asia/Novosibirsk':'Новосибирск'
+})[zone]||zone;
+export const lastMilestone=seconds=>seconds>=365*day
+  ?Math.floor(seconds/(365*day))*365
+  :milestones.findLast(d=>seconds>=d*day)??0;
+function goal(seconds) {
+  const from=lastMilestone(seconds);
+  const next=milestones.find(d=>seconds<d*day)??from+365;
+  const elapsed=seconds-from*day,total=(next-from)*day;
+  const percent=Math.min(99,Math.round(elapsed*100/total)),cells=Math.min(9,Math.round(elapsed*10/total));
+  return {next,left:compactDuration(next*day-seconds,true),bar:`${'▓'.repeat(cells)}${'░'.repeat(10-cells)} ${percent}%`};
 }
-export const reportButtons=()=>({inline_keyboard:[[
-  {text:'🫁 Что уже изменилось',callback_data:'report:health'},
-  {text:'ℹ️ Как считаем',callback_data:'report:methodology'}
-]]});
-export function healthReport(seconds) {
-  const reached=A.STAGES.filter(s=>seconds>=s.seconds),next=A.STAGES.find(s=>seconds<s.seconds);
-  const line=s=>`${s.label}: ${s.text} <a href="${s.source}">Источник</a>`;
-  return ['<b>🫁 Что уже изменилось</b>','Возможные изменения по длительности текущей серии; наступление изменений у вас не измеряется.','',
-    '<b>Достигнутые временные ориентиры</b>',...reached.map(s=>'✓ '+line(s)),
-    ...(!reached.length?['Пока нет достигнутых ориентиров.']:[]),'','<b>Ближайший ориентир</b>',
-    next?line(next):'Все ориентиры календаря пройдены по времени.','',A.HEALTH_NOTE].join('\n');
+const series=(seconds)=>`🚭 <b>${compactDuration(seconds,true)} без сигарет</b>`;
+function totals(s,timeLabel='Свободного времени') {
+  const money=Object.entries(s.money).map(([currency,value])=>`${integer(value)} ${esc(currencySymbol(currency))}`).join(' + ');
+  return `🚬 Не выкурено: ${integer(s.cigarettes)} шт.\n💰 Сэкономлено: ${money}\n⏳ ${timeLabel}: ${compactDuration(s.free_minutes.mul(60).toNumber())}`;
 }
-export function methodologyReport() {
-  return ['<b>ℹ️ Как считаем</b>',
-    'Все показатели отчёта рассчитаны на один момент времени. Текущая серия — время с последней сигареты; после срыва начинается заново. Шкала показывает путь между предыдущей достигнутой и следующей вехой. При достижении цели начинается новый этап с явно указанными границами; серия и достигнутые цели сохраняются.',
-    'Не выкурено ≈ сумма (секунды без курения / 86 400 × прежние сигареты в день).',
-    'Сэкономлено ≈ сумма (не выкурено × цена пачки / сигарет в пачке). Валюты учитываются отдельно, без конвертации.',
-    'Освобождено времени ≈ сумма (не выкурено × прежние минуты на сигарету).',
-    'Суммы учитывают все бездымные периоды; промежутки срыва исключены. Завершённые периоды сохраняют свои параметры. Изменение расхода, цены и длительности пересчитывает текущую серию.',
-    'Сигареты и деньги округляются до целых только при показе утром. Время показывается без нулевых частей, от суток — дни и часы без минут. Полные показатели: «📊 Мой прогресс».',
-    'Это статистические оценки по прежним привычкам, а не измерение фактических покупок, состояния здоровья или личной продолжительности жизни.','',
-    A.MODEL_NOTE+` <a href="${A.ADDICTION}">Исследование</a>`,'',A.HEALTH_NOTE,'',
-    '<b>Источники медицинских ориентиров</b>',...Array.from(new Set(A.STAGES.map(s=>s.source))).map(url=>`<a href="${url}">${new URL(url).hostname}</a>`)
+export function morningReport(s,localDay,id,milestone=0) {
+  const {next,left,bar}=goal(s.current_seconds);
+  const fact=`✨ <b>Факт дня</b>\n\n${dailyFact(s.current_seconds,localDay,id)}`;
+  if(milestone) return `🏆 <b>${awards[milestone]?.[2]??daysText(milestone)+' без сигарет!'}</b>\n\n`+
+    `🚭 ${daysText(milestone)} — новый рубеж!\n\n${totals(s)}\n\n${fact}\n\n🎯 Следующая цель — ${daysText(next)}.`;
+  return `${series(s.current_seconds)}\n\n🎯 До ${next} ${plural(next,'дня','дней','дней')} — ${left}\n${bar}\n\n${totals(s)}\n\n${fact}`;
+}
+export function progressReport(s,earned) {
+  const {next,bar}=goal(s.current_seconds),locked=milestones.find(d=>!earned.has(d));
+  const history=milestones.filter(d=>earned.has(d)).slice(-3).map(d=>'✅ '+awards[d][1]);
+  if(locked)history.push(`🔒 ${awards[locked][1]} — следующая награда`);
+  const life=s.life_minutes.mul(60).toDecimalPlaces(0,Decimal.ROUND_HALF_UP).toNumber();
+  const total=s.total_seconds>s.current_seconds?`\n📅 Всего без сигарет: ${compactDuration(s.total_seconds,true)}`:'';
+  return `<b>📊 Мой прогресс</b>\n\n${series(s.current_seconds)}\n\n🎯 Следующая цель — ${daysText(next)}\n${bar}\n\n${totals(s)}\n`+
+    `❤️ Статистический эквивалент жизни: ≈${compactDuration(life,true)}${total}\n\n<b>🏆 Мои достижения</b>\n\n${history.join('\n')}`;
+}
+export function awardsReport(seconds,earned) {
+  const locked=milestones.find(d=>!earned.has(d));
+  const collection=milestones.map(d=>`${earned.has(d)?awards[d][0]:'🔒'} ${awards[d][1]}`).join('\n');
+  const next=locked?`🎯 Следующая награда — ${awards[locked][1]}\n⏳ До неё — ${compactDuration(locked*day-seconds,true)}`:'Все награды получены! 🎉';
+  return `<b>🏆 Все достижения</b>\n\nПолучено: ${earned.size} из ${milestones.length}\n\n${collection}\n\n${next}`;
+}
+export function cravingReport(s) {
+  return `<b>🆘 Хочу закурить</b>\n\n${series(s.current_seconds)}\n\n${totals(s,'Освобождено')}\n\n`+
+    '💧 Выпей воды или немного пройдись. Дай себе 5 минут.\n\n<b>Не нужно решать «навсегда». Просто не кури сейчас.</b>';
+}
+export const buttons=(...rows)=>({inline_keyboard:rows.map(row=>row.map(([text,callback_data])=>({text,callback_data})))});
+export const reportButtons=()=>buttons([['🫁 Здоровье','report:health'],['ℹ️ Как считаем','report:methodology']]);
+export function methodologyReport(detailed=false) {
+  const title='<b>ℹ️ Как считаем</b>';
+  if(!detailed)return [
+    title,'Все показатели рассчитываются автоматически по твоим настройкам и времени без сигарет.',
+    '🚬 Не выкурено — по прежней привычке.',
+    '💰 Сэкономлено — по цене пачки.',
+    '⏳ Свободное время — по длительности перекуров.',
+    '❤️ Эквивалент жизни — по статистической модели.'
+  ].join('\n\n');
+
+  return [
+    title,
+    'Не выкурено ≈ секунды без курения / 86 400 × прежние сигареты в день.',
+    'Сэкономлено ≈ не выкурено × цена пачки / сигарет в пачке. Суммы в разных валютах показываем отдельно.',
+    'Свободное время ≈ не выкурено × минуты на перекур.',
+    'Эквивалент жизни ≈ не выкурено × 20 минут. '+A.MODEL_NOTE+` <a href="${A.ADDICTION}">Исследование</a>`,
+    'Итоги складываются из всех бездымных периодов. Промежутки срыва исключены. Изменение настроек пересчитывает текущую серию. Сигареты и деньги округляются при показе.',
+    'Шкала показывает долю пути от предыдущего рубежа до следующего. При достижении рубежа начинается новый отрезок.'
   ].join('\n\n');
 }
-export function stageLine(sec) {
-  const s=A.STAGES.findLast(s=>sec>=s.seconds);
-  return s?`${s.label}: ${s.text} <a href="${s.source}">Источник</a>`:'Первые изменения начинаются вскоре после отказа. Ближайший ориентир — около 20 минут.';
-}
-export function report(streaks,now,day,id,morning=false) {
-  if(morning) return morningReport(streaks,now);
-  const s=calculate(streaks,now), index=Math.floor(Date.parse(day)/86400000)+719163+id;
-  const title=morning?A.GREETINGS[index%A.GREETINGS.length]:'Ваш прогресс';
-  const money=Object.entries(s.money).map(([k,v])=>`${number(v)} ${esc(k)}`).join(' + ');
-  const next=milestones.find(d=>s.current_seconds<d*86400)??(Math.floor(s.current_seconds/(365*86400))+1)*365;
-  return `<b>🚭 НЕ КУРЮ · ${title}</b>\n${day.split('-').reverse().join('.')}\n\n`+
-    `🚭 Текущая серия: <b>${duration(s.current_seconds)}</b>\n`+
-    `📅 Всего в учтённых бездымных периодах: ${duration(s.total_seconds)}\n`+
-    `🚬 Не выкурено, оценка: <b>≈ ${number(s.cigarettes)}</b>\n`+
-    `💰 Сэкономлено, оценка: <b>≈ ${money}</b>\n`+
-    `⏳ Освобождено времени: ≈ ${duration(s.free_minutes.mul(60).toDecimalPlaces(0,Decimal.ROUND_HALF_UP).toNumber())}\n`+
-    `❤️ Популяционный эквивалент потери ожидаемой жизни: ≈ ${duration(s.life_minutes.mul(60).toDecimalPlaces(0,Decimal.ROUND_HALF_UP).toNumber())}\n`+
-    `<i>${A.MODEL_NOTE}</i> <a href="${A.ADDICTION}">Исследование</a>\n\n`+
-    `🫁 <b>Ориентир для текущей серии</b>\n${stageLine(s.current_seconds)}\n`+
-    `<i>Сроки индивидуальны, это не медицинская гарантия.</i>\n\n`+
-    `🎯 ${next} дн. в текущей серии — осталось ${duration(next*86400-s.current_seconds)}\n\n`+
-    `💬 ${A.THOUGHTS[index%A.THOUGHTS.length]}\n\n`+
-    '<i>Итоги — модель по прежнему расходу во всех бездымных периодах. Промежуток срыва исключён; фактические расходы и здоровье модель не измеряет.</i>';
-}
 export const menu=()=>({keyboard:[[0,1],[2,3],[4]].map(row=>row.map(i=>({text:A.MENU_LABELS[i]}))),resize_keyboard:true});
-export const choices=field=>({keyboard:[...A.CHOICES[field].map(text=>[{text}]),[{text:'Отмена'}]],resize_keyboard:true,input_field_placeholder:'Введите ответ или нажмите кнопку'});
-export const settings=(enabled=true)=>({inline_keyboard:[...A.FIELDS.map(f=>[{text:A.LABELS[f],callback_data:`edit:${f}`}]),[{text:enabled?'🔕 Выключить утренний отчёт':'🔔 Включить утренний отчёт',callback_data:enabled?'notify:off':'notify:on'}],[{text:'↩️ Отметить срыв',callback_data:'lapse'}],[{text:'🔒 О данных',callback_data:'privacy'}]]});
-export const confirmation=nonce=>({inline_keyboard:[[{text:'Подтвердить срыв',callback_data:`lapse:confirm:${nonce}`},{text:'Отмена',callback_data:'cancel'}]]});
-export const original = prefix => {const text=A.TEXTS.find(t=>t.startsWith(prefix));if(!text)throw new ValidationError('Missing original text');return text;};
+export const choices=(...labels)=>({
+  keyboard:[...(labels.length?[labels.map(text=>({text}))]:[]),[{text:'Отмена'}]],
+  resize_keyboard:true,one_time_keyboard:true
+});
+export const settings=()=>buttons(
+  [['🚭 Дата отказа','edit:start']],
+  [['🚬 Привычка','edit:daily'],['📦 Размер пачки','edit:pack']],
+  [['💰 Стоимость','edit:cost'],['⏰ Уведомления','notifications']],
+  [['🌍 Часовой пояс','edit:timezone'],['⏳ Минут на сигарету','edit:minutes']],
+  [['🚬 Отметить срыв','lapse']],[['🗑 Удалить мои данные','delete']]
+);
+export const confirmation=nonce=>buttons([['Подтвердить срыв',`lapse:confirm:${nonce}`],['Отмена','cancel']]);

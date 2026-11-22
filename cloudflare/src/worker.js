@@ -1,5 +1,5 @@
 import {Database} from './db.js';
-import {local,stamp,nextDue,dayDue,report,reportButtons} from './core.js';
+import {local,stamp,nextDue,dayDue,calculate,lastMilestone,morningReport,reportButtons} from './core.js';
 import {handleUpdate,telegram,DeliveryError} from './bot.js';
 
 // Production: dispatcher <=6 D1 calls +8 public HTTP loopbacks =14 subrequests.
@@ -27,7 +27,8 @@ async function deliverReport(db,env,candidate,now,api) {
     const rows=await db.db.batch([
       db.stmt('SELECT * FROM users WHERE user_id=?',id),
       db.stmt('SELECT * FROM streaks WHERE user_id=? ORDER BY id',id),
-      db.stmt('SELECT * FROM reports WHERE user_id=? AND local_date=?',id,day)
+      db.stmt('SELECT * FROM reports WHERE user_id=? AND local_date=?',id,day),
+      db.stmt('SELECT milestone FROM reports WHERE user_id=? AND milestone IS NOT NULL',id)
     ]);
     const u=rows[0].results[0],streaks=rows[1].results,previous=rows[2].results[0];
     if(!u?.enabled||u.next_due_at==null||u.next_due_at>now||u.timezone!==candidate.timezone)return;
@@ -38,17 +39,27 @@ async function deliverReport(db,env,candidate,now,api) {
     if(previous&&(!['retry','reserved'].includes(previous.status)||(previous.status==='reserved'&&previous.attempts>=2))) {
       await db.run('UPDATE users SET next_due_at=? WHERE user_id=?',next,id);return;
     }
-    const text=report(streaks,now,day,id,true),attempts=(previous?.attempts||0)+1;
+    const stats=calculate(streaks,now),attempts=(previous?.attempts||0)+1;
+    const reached=lastMilestone(stats.current_seconds);
+    let milestone=null;
+    if(reached&&!previous?.milestone&&!rows[3].results.some(row=>row.milestone===reached)) {
+      const yesterday=Date.parse(day)-86400000;
+      const crossed=+new Date(streaks.at(-1).start)+reached*86400000;
+      // Skip the IANA conversion for old milestones, even at the largest UTC offsets.
+      if(crossed>yesterday-86400000&&crossed>dayDue(new Date(yesterday).toISOString().slice(0,10),u.timezone,u.report_time))milestone=reached;
+    }
+    const text=morningReport(stats,day,id,milestone);
     // Reservation + retry lease are atomic and survive a terminated invocation.
     await db.batch([
-      db.stmt("INSERT INTO reports(user_id,local_date,status,created_at,attempts) VALUES (?,?,'reserved',?,?) ON CONFLICT(user_id,local_date) DO UPDATE SET status='reserved',created_at=excluded.created_at,attempts=excluded.attempts",id,day,stamp(now),attempts),
+      db.stmt("INSERT INTO reports(user_id,local_date,status,created_at,attempts,milestone) VALUES (?,?,'reserved',?,?,?) ON CONFLICT(user_id,local_date) DO UPDATE SET status='reserved',created_at=excluded.created_at,attempts=excluded.attempts,milestone=COALESCE(reports.milestone,excluded.milestone)",id,day,stamp(now),attempts,milestone),
       db.stmt('UPDATE users SET next_due_at=? WHERE user_id=?',now+LEASE,id)
     ]);
     let error;
     try {await api(env,'sendMessage',{chat_id:u.chat_id,text,parse_mode:'HTML',reply_markup:reportButtons(),link_preview_options:{is_disabled:true}});}catch(e){error=e;}
     const {status,retry}=deliveryResult(error,attempts,now);
     await db.batch([
-      db.stmt('UPDATE reports SET status=? WHERE user_id=? AND local_date=?',status,id,day),
+      // Telegram explicitly rejected a 429; ambiguous timeouts must keep the reservation.
+      db.stmt('UPDATE reports SET status=?,milestone=CASE WHEN ? THEN NULL ELSE milestone END WHERE user_id=? AND local_date=?',status,milestone!==null&&error instanceof DeliveryError&&error.code===429?1:0,id,day),
       db.stmt('UPDATE users SET next_due_at=?,enabled=? WHERE user_id=?',status==='blocked'?null:retry||next,status==='blocked'?0:1,id),
       db.stmt('DELETE FROM report_retries WHERE user_id=?',id),
       db.stmt("UPDATE reports SET status='expired' WHERE user_id=? AND local_date<? AND status IN ('reserved','retry')",id,day),

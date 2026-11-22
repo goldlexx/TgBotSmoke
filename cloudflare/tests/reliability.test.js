@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {performance} from 'node:perf_hooks';
 import {database,now,profile,request,message,callback} from './helpers.js';
 import worker,{webhook,tick,TICK_LIMIT,deliveryResult} from '../src/worker.js';
-import {nextDue,dayDue,local,morningReport,milestones} from '../src/core.js';
+import {nextDue,dayDue,local,stamp} from '../src/core.js';
 import {DeliveryError} from '../src/bot.js';
 import {Temporal} from '@js-temporal/polyfill';
 const active=db=>db.run("UPDATE cloud_control SET value='1' WHERE key='active'");
@@ -15,6 +15,10 @@ test('additive migration preserves legacy rows and foreign keys',async()=>{
   const before=JSON.stringify(sql.prepare('SELECT * FROM streaks').all());
   sql.exec(readFileSync(new URL('../migrations/0002_reliability.sql',import.meta.url),'utf8'));
   assert.equal(JSON.stringify(sql.prepare('SELECT * FROM streaks').all()),before);
+  sql.exec(readFileSync(new URL('../migrations/0003_motivation.sql',import.meta.url),'utf8'));
+  assert.equal(JSON.stringify(sql.prepare('SELECT * FROM streaks').all().map(({lapse_count,...row})=>{
+    assert.equal(lapse_count,null);return row;
+  })),before);
   assert.equal(sql.prepare('SELECT count(*) n FROM users').get().n,1);
   assert.equal(sql.prepare('SELECT status FROM reports').get().status,'sent');
   assert.equal(sql.prepare('PRAGMA foreign_key_check').all().length,0);
@@ -102,10 +106,45 @@ test('delete erases related data, cancels pending replies and rejects old events
 test('confirmed lapse is idempotent across Telegram redeliveries and distinct duplicate callbacks',async()=>{
   const {db,env}=database();await active(db);await db.register(105,105,profile,now-86400000);const api=async()=>{};
   await webhook(request(callback(105,1011,'lapse')),env,now,api);
-  const nonce=(await db.state(105,123456)).nonce,u=callback(105,1012,'lapse:confirm:'+nonce,now+11000);
-  await webhook(request(u),env,now+11000,api);await webhook(request(u),env,now+22000,api);
-  await webhook(request(callback(105,1013,'lapse:confirm:'+nonce,now+33000)),env,now+33000,api);
+  const choice=(await db.state(105,123456)).nonce;
+  await webhook(request(callback(105,1012,'lapse:now:'+choice,now+11000)),env,now+11000,api);
+  assert.equal((await db.streaks(105)).length,1);
+  const nonce=(await db.state(105,123456)).nonce,u=callback(105,1013,'lapse:confirm:'+nonce,now+22000);
+  await webhook(request(u),env,now+22000,api);await webhook(request(u),env,now+33000,api);
+  await webhook(request(callback(105,1014,'lapse:confirm:'+nonce,now+44000)),env,now+44000,api);
   assert.equal((await db.streaks(105)).length,2);
+  assert.equal((await db.streaks(105))[0].lapse_count,1);
+});
+
+test('a milestone is celebrated at the first morning after reaching it and once across series',async()=>{
+  const {db,env}=database();await active(db);
+  const start=stamp(now-7*86400000-6*3600000);
+  await db.register(110,110,{...profile,start},now-86400000);
+  const sent=[],api=async(_,method,body)=>sent.push(body.text);
+  await tick(env,now,api);await tick(env,now,api);
+  assert.equal(sent.length,1);
+  assert.match(sent[0],/Целая неделя без сигарет!/);
+  assert.match(sent[0],/Факт дня/);
+  assert.match(sent[0],/Следующая цель — 14 дней/);
+  const [old]=await db.streaks(110);
+  await db.lapse(110,old.id,stamp(now),stamp(now),now,1);
+  await tick(env,now+7*86400000+1000,api);
+  assert.equal(sent.length,2);
+  assert(!sent[1].includes('🏆'));
+  assert.equal((await db.one('SELECT count(*) AS n FROM reports WHERE milestone=7')).n,1);
+});
+
+test('ambiguous delivery retries the report without the milestone; 429 can still celebrate',async()=>{
+  for(const code of [0,429]) {
+    const {db,env}=database();await active(db);
+    await db.register(111,111,{...profile,start:stamp(now-86400000)},now-86400000);
+    const sent=[],api=async(_,method,body)=>{sent.push(body.text);if(sent.length===1)throw new DeliveryError(code);};
+    await tick(env,now,api);await tick(env,now+60000,api);
+    assert.equal(sent.length,2);
+    assert.match(sent[0],/Первый день без сигарет!/);
+    assert.equal(sent[1].includes('🏆'),code===429);
+    assert.equal((await db.one('SELECT milestone,status FROM reports WHERE milestone=1')).status,'sent');
+  }
 });
 test('two ambiguous attempts are the maximum, including lost final commit',async()=>{
   const {db,env,sql}=database();await active(db);await db.register(106,106,profile,now-86400000);

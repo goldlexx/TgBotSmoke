@@ -73,14 +73,14 @@ export class Database {
     }
     await this.batch(stmts);
   }
-  async lapse(id,streakId,began,last,now) {
+  async lapse(id,streakId,began,last,now,count=null) {
     let b=minute(began),l=minute(last);
     if(l<b||l>minute(now)) throw new ValidationError('Последняя сигарета должна быть не раньше начала срыва и не в будущем.');
     const active=(await this.streaks(id)).at(-1);
     if(active.id!==streakId||active.end) throw new ValidationError('Серия уже изменилась. Откройте настройки заново.');
     if(b<minute(active.start)) throw new ValidationError('Начало срыва не может быть раньше начала текущей серии.');
     b=Math.max(b,+new Date(active.start));l=Math.max(l,b);
-    await this.batch([...this.awardStatements(id,[active],b),this.stmt('UPDATE streaks SET end=? WHERE id=?',stamp(b),active.id),this.newStreak(id,stamp(l),await this.user(id))]);
+    await this.batch([...this.awardStatements(id,[active],b),this.stmt('UPDATE streaks SET end=?,lapse_count=? WHERE id=?',stamp(b),count,active.id),this.newStreak(id,stamp(l),await this.user(id))]);
   }
   fsmKey(id,botId) {return '['+[botId,id,id,null,null,'default'].map(v=>JSON.stringify(v)).join(', ')+']';}
   async state(id,botId) {
