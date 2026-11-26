@@ -9,6 +9,77 @@ import {DeliveryError} from '../src/bot.js';
 import {Temporal} from '@js-temporal/polyfill';
 const active=db=>db.run("UPDATE cloud_control SET value='1' WHERE key='active'");
 
+test('/admin fails closed before querying D1',async()=>{
+  const {env,metrics}=database();
+  const admin=message(501,501,'/admin');
+  const api=()=>assert.fail('Unexpected Telegram reply');
+  for(const owner of [undefined,'','invalid','0501','501.0','+501','900','-501',501]) {
+    assert.equal((await webhook(request(admin),{...env,OWNER_CHAT_ID:owner},now,api)).status,200);
+  }
+  env.OWNER_CHAT_ID='501';
+  const group={...admin,message:{...admin.message,chat:{id:-601,type:'group'}}};
+  const mismatchedSender={...admin,message:{...admin.message,from:{id:502,username:'owner'}}};
+  for(const update of [group,mismatchedSender,message(502,502,'/admin')]) {
+    assert.equal((await webhook(request(update),env,now,api)).status,200);
+  }
+  assert.equal((await webhook(request(admin,'wrong'),env,now,api)).status,403);
+  assert.equal(metrics.calls,0);
+});
+
+test('/admin counts registered subscriptions and scheduler eligibility without changing personal data',async()=>{
+  const {db,env,sql,metrics}=database();
+  env.OWNER_CHAT_ID='510';
+  const replies=[];
+  const api=async(_,method,body)=>{assert.equal(method,'sendMessage');assert.equal(body.chat_id,510);replies.push(body);};
+  const send=(seq,text,time=now)=>webhook(request(message(510,seq,text,time)),env,time,api);
+  assert.equal((await send(510,'/admin')).status,503);
+  await active(db);
+  assert.equal((await send(510,'/admin')).status,200);
+  const expected=(total,subscribed)=>[
+    '📊 <b>Статистика бота</b>','',`👥 Пользователей в базе: ${total}`,
+    `✅ Завершили регистрацию: ${total}`,`🔔 Включили уведомления: ${subscribed}`,
+    `📨 Могут получать автоматические отчёты: ${subscribed}`
+  ].join('\n');
+  assert.equal(replies[0].text,expected(0,0));
+  for(const id of [510,511,512,513])await db.register(id,id,profile,now);
+  await db.notifications(512,false,now);
+  await db.run('UPDATE users SET next_due_at=NULL WHERE user_id=511');
+  await db.run('UPDATE users SET next_due_at=? WHERE user_id=510',now-1);
+  await db.saveState(510,123456,{state:'start',mode:'edit'});
+  await db.saveState(999,123456,{state:'start',mode:'register'});
+  const snapshot=()=>['users','fsm','streaks','achievements','reports','report_retries'].map(table=>sql.prepare(`SELECT * FROM ${table} ORDER BY 1,2`).all());
+  const before=snapshot();
+  metrics.sql.length=0;
+  assert.equal((await send(511,'/admin@SmokeTestBot')).status,200);
+  assert.equal(replies[1].text,expected(4,3));
+  assert.equal(replies[1].parse_mode,'HTML');
+  assert(!metrics.sql.some(query=>/SELECT \* FROM (users|fsm|streaks|reports|achievements)/.test(query)));
+  assert.equal((await send(511,'/admin@SmokeTestBot')).status,200);
+  assert.equal(replies.length,2);
+  assert.deepEqual(snapshot(),before);
+  await tick(env,now,async()=>{});
+  assert((await db.user(511)).next_due_at>now);
+  assert.equal((await db.user(512)).next_due_at,null);
+  assert.equal((await send(512,'/admin')).status,200);
+  assert.equal(replies[2].text,expected(4,3));
+});
+
+test('/admin warns only starting at 200 registered users',async()=>{
+  const {db,env,sql}=database();
+  await active(db);env.OWNER_CHAT_ID='520';
+  const insert=sql.prepare("INSERT INTO users(user_id,chat_id,daily,price,currency,pack,minutes,timezone,report_time,enabled) VALUES (?, ?,20,'250','RUB',20,'5','UTC','08:00',0)");
+  for(let id=1;id<=199;id++)insert.run(id,id);
+  const replies=[];
+  const api=async(_,method,body)=>{assert.equal(method,'sendMessage');replies.push(body.text);};
+  await webhook(request(message(520,520,'/admin')),env,now,api);
+  insert.run(200,200);
+  await webhook(request(message(520,521,'/admin')),env,now,api);
+  assert.match(replies[0],/Завершили регистрацию: 199/);
+  assert.doesNotMatch(replies[0],/пропускную способность/);
+  assert.match(replies[1],/Завершили регистрацию: 200/);
+  assert.match(replies[1],/⚠️ Пора проверить пропускную способность рассылки\.$/);
+});
+
 test('additive migration preserves legacy rows and foreign keys',async()=>{
   const {sql}=database({legacy:true});
   sql.exec("INSERT INTO users VALUES(1,1,20,'250','RUB',20,'5','Europe/Moscow','08:00',1); INSERT INTO streaks VALUES(1,1,'2026-01-01',NULL,20,'250','RUB',20,'5'); INSERT INTO reports VALUES(1,'2026-11-15','sent','2026-11-15'); INSERT INTO webhook_updates VALUES(5,'2026-11-15')");

@@ -158,6 +158,8 @@ export async function webhook(request,env,now=Date.now(),api=telegram,dispatch=n
   const m=update.callback_query?.message||update.message,id=(update.callback_query?.from||m?.from)?.id;
   if(!Number.isSafeInteger(id)||m?.chat?.type!=='private'||id!==m.chat.id)return new Response('OK');
   if(!update.callback_query&&(!Number.isSafeInteger(m.date)||m.date<now/1000-86400))return new Response('OK');
+  const admin=!update.callback_query&&typeof m.text==='string'&&/^\/admin(?:@[A-Za-z0-9_]+)?$/.test(m.text.trim());
+  if(admin&&(id<=0||env.OWNER_CHAT_ID!==String(id)))return new Response('OK');
   if(spam(id,now))return new Response('OK');
   if(!await db.active())return new Response('Not active',{status:503});
   const owner=crypto.randomUUID();
@@ -168,25 +170,40 @@ export async function webhook(request,env,now=Date.now(),api=telegram,dispatch=n
     const botId=Number(env.BOT_TOKEN.split(':')[0]);
     const initial=await db.db.batch([
       db.stmt('SELECT update_id FROM webhook_updates WHERE update_id=?',update.update_id),
-      db.stmt('SELECT deleted_at FROM deleted_accounts WHERE subject=?',db.subject),
-      db.stmt('SELECT * FROM fsm WHERE key=?',db.fsmKey(id,botId)),
-      db.stmt('SELECT * FROM users WHERE user_id=?',id),
+      ...(!admin?[
+        db.stmt('SELECT deleted_at FROM deleted_accounts WHERE subject=?',db.subject),
+        db.stmt('SELECT * FROM fsm WHERE key=?',db.fsmKey(id,botId)),
+        db.stmt('SELECT * FROM users WHERE user_id=?',id)
+      ]:[]),
       db.stmt('INSERT INTO rate_limits SELECT ?,?,1 WHERE NOT EXISTS(SELECT 1 FROM webhook_updates WHERE update_id=?) ON CONFLICT(subject) DO UPDATE SET window=excluded.window,count=CASE WHEN window=excluded.window THEN count+1 ELSE 1 END WHERE window!=excluded.window OR count<12 RETURNING count',db.subject,Math.floor(now/60000),update.update_id)
     ]);
     if(initial[0].results.length)return new Response('OK');
-    const fsm=initial[2].results[0];
-    db.preloaded={id,user:initial[3].results[0]||null,state:fsm?{state:fsm.state,...JSON.parse(fsm.data)}:{}};
-    const deleted=initial[1].results[0];
-    if(deleted) {
-      if(!m.date||m.date<=deleted.deleted_at)return new Response('OK');
-      if(!db.preloaded.user&&!/^\/start(?:@\w+)?(?:\s|$)/.test(m.text||'')&&!fsm)return new Response('OK');
-    }
-    if(!initial[4].results.length)return new Response('OK');
+    if(!initial.at(-1).results.length)return new Response('OK');
     const replies=[],cosmetic=[];db.begin();
-    await handleUpdate(update,db,env,now,async(e,method,body)=>{
-      if(method==='answerCallbackQuery'){try {await api(e,method,body);}catch{}return;}
-      if(method==='sendMessage')replies.push({method,body});else cosmetic.push({method,body});
-    });
+    if(admin) {
+      const {registered,subscribed,eligible}=await db.one(`SELECT COUNT(*) AS registered,
+        COUNT(*) FILTER (WHERE enabled=1) AS subscribed,
+        COUNT(*) FILTER (WHERE enabled=1 AND EXISTS (
+          SELECT 1 FROM cloud_control WHERE key='active' AND value='1'
+        )) AS eligible FROM users`);
+      const lines=['📊 <b>Статистика бота</b>','',`👥 Пользователей в базе: ${registered}`,
+        `✅ Завершили регистрацию: ${registered}`,`🔔 Включили уведомления: ${subscribed}`,
+        `📨 Могут получать автоматические отчёты: ${eligible}`];
+      if(registered>=200)lines.push('','⚠️ Пора проверить пропускную способность рассылки.');
+      replies.push({method:'sendMessage',body:{chat_id:id,text:lines.join('\n'),parse_mode:'HTML'}});
+    }else {
+      const fsm=initial[2].results[0];
+      db.preloaded={id,user:initial[3].results[0]||null,state:fsm?{state:fsm.state,...JSON.parse(fsm.data)}:{}};
+      const deleted=initial[1].results[0];
+      if(deleted) {
+        if(!m.date||m.date<=deleted.deleted_at)return new Response('OK');
+        if(!db.preloaded.user&&!/^\/start(?:@\w+)?(?:\s|$)/.test(m.text||'')&&!fsm)return new Response('OK');
+      }
+      await handleUpdate(update,db,env,now,async(e,method,body)=>{
+        if(method==='answerCallbackQuery'){try {await api(e,method,body);}catch{}return;}
+        if(method==='sendMessage')replies.push({method,body});else cosmetic.push({method,body});
+      });
+    }
     const committed=await db.commit([
       db.stmt('INSERT INTO webhook_updates(update_id,created_at,user_id) VALUES (?,?,?)',update.update_id,stamp(now),db.deleting?null:id),
       ...(!db.deleting?replies.map((r,i)=>db.stmt('INSERT INTO delivery_outbox(update_id,user_id,sequence,method,body,due_at,created_at) VALUES (?,?,?,?,?,?,?) RETURNING id',update.update_id,id,i,r.method,JSON.stringify(r.body),now,now)):[])
