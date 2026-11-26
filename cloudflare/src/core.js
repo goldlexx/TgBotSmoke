@@ -51,32 +51,32 @@ export function dayDue(day,zone,clock) {
 }
 export function parseDate(text,zone,now=Date.now(),provisional=false) {
   if (['сейчас','только что'].includes(text.toLowerCase())) return stamp(minute(now));
-  const m = /^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})(?: ([+-]\d{4}))?$/.exec(text);
-  if (!m) throw new ValidationError('Введите ДД.ММ.ГГГГ ЧЧ:ММ, например 15.11.2026 21:30, или «Сейчас».');
-  const [day,month,year,hour,min] = [m[1],m[2],m[3],m[4],m[5]].map(Number);
-  if(year<1900) throw new ValidationError('Укажите дату начиная с 1900 года.');
+  const m = /^(?:(\d{1,2})\.(\d{1,2})\.(\d{4})|(\d{4})-(\d{2})-(\d{2}))(?: +|T)(\d{1,2}):(\d{2})(?:\s+([+-]\d{4}))?$/.exec(text);
+  if (!m) throw new ValidationError('Введи дату и время, например 15.11.2026 21:30, или выбери «Сейчас».');
+  const [day,month,year,hour,min] = [m[1]??m[6],m[2]??m[5],m[3]??m[4],m[7],m[8]].map(Number);
+  if(year<1900) throw new ValidationError('Укажи дату начиная с 1900 года.');
   let p;
   try { p = Temporal.PlainDateTime.from({year,month,day,hour,minute:min}, {overflow:'reject'}); }
-  catch { throw new ValidationError('Введите дату ДД.ММ.ГГГГ ЧЧ:ММ или нажмите «Сейчас».'); }
+  catch { throw new ValidationError('Такой даты или времени нет. Проверь ввод или выбери «Сейчас».'); }
   let ms;
-  if(provisional && !m[6]) ms=Number(p.toZonedDateTime('+14:00').epochMilliseconds);
-  else if(m[6]) {
-    const offset=m[6].slice(0,3)+':'+m[6].slice(3);
+  if(provisional && !m[9]) ms=Number(p.toZonedDateTime('+14:00').epochMilliseconds);
+  else if(m[9]) {
+    const offset=m[9].slice(0,3)+':'+m[9].slice(3);
     try {ms=Number(p.toZonedDateTime(offset).epochMilliseconds);}
     catch {throw new ValidationError('Укажи допустимое смещение UTC, например +0300.');}
     if(!provisional && !Temporal.Instant.fromEpochMilliseconds(ms).toZonedDateTimeISO(zone).toPlainDateTime().equals(p)) throw new ValidationError('Смещение UTC не соответствует выбранному часовому поясу.');
   } else {
     try { ms=Number(p.toZonedDateTime(zone,{disambiguation:'reject'}).epochMilliseconds); }
-    catch { throw new ValidationError('Время отсутствует или неоднозначно из-за перевода часов. Добавьте смещение, например +0200 или +0100.'); }
+    catch { throw new ValidationError('Время отсутствует или неоднозначно из-за перевода часов. Выбери другое время или укажи смещение, например +0200 или +0100.'); }
   }
   if(minute(ms)>minute(now)) throw new ValidationError('Последняя сигарета не может быть в будущем.');
   return stamp(ms);
 }
 export function numeric(text,lower,upper,integer=false) {
-  if(!/^\d{1,7}(?:[.,]\d{1,2})?$/.test(text)) throw new ValidationError('Введите число (не больше двух знаков после запятой).');
+  if(!/^\d{1,7}(?:[.,]\d{1,2})?$/.test(text)) throw new ValidationError('Введи число (не больше двух знаков после запятой).');
   const n=new Decimal(text.replace(',','.'));
   if(n.lt(lower)||n.gt(upper)) throw new ValidationError(`Допустимо от ${lower} до ${upper}.`);
-  if(integer&&!n.isInteger()) throw new ValidationError('Введите целое число.');
+  if(integer&&!n.isInteger()) throw new ValidationError('Введи целое число.');
   return integer?n.toNumber():text.replace(',','.').replace(/^0+(?=\d)/,'');
 }
 export function parseField(field,text,zone,now=Date.now()) {
@@ -93,8 +93,7 @@ export function parseField(field,text,zone,now=Date.now()) {
   if(field==='timezone') {try {local(now,text);} catch {throw new ValidationError('Неизвестный пояс. Пример: Europe/Moscow или Asia/Yekaterinburg.');} return text;}
   if(field==='report_time') {
     const m=/^(\d{1,2}):(\d{2})$/.exec(text);
-    if(!m) throw new ValidationError('Введите время в формате ЧЧ:ММ, например 08:00.');
-    if(+m[1]>23||+m[2]>59) throw new ValidationError('Часы: 00–23, минуты: 00–59.');
+    if(!m||+m[1]>23||+m[2]>59) throw new ValidationError('Введи время от 0:00 до 23:59, например 6:00 или 18:30.');
     return m[1].padStart(2,'0')+':'+m[2];
   }
   throw new ValidationError('Неизвестное поле.');
@@ -142,9 +141,11 @@ export const dateLabel=(value,zone)=>{
   const {day,clock}=local(value,zone);
   return day.split('-').reverse().join('.')+' '+clock;
 };
-export const zoneLabel=zone=>({
-  'Europe/Moscow':'Москва','Asia/Yekaterinburg':'Екатеринбург','Asia/Novosibirsk':'Новосибирск'
-})[zone]||zone;
+export const cities={
+  'Europe/Moscow':'Москва','Europe/Kaliningrad':'Калининград','Asia/Yekaterinburg':'Екатеринбург',
+  'Asia/Novosibirsk':'Новосибирск','Asia/Vladivostok':'Владивосток','Europe/Berlin':'Берлин'
+};
+export const zoneLabel=zone=>Object.hasOwn(cities,zone)?cities[zone]:zone;
 export const lastMilestone=seconds=>seconds>=365*day
   ?Math.floor(seconds/(365*day))*365
   :milestones.findLast(d=>seconds>=d*day)??0;

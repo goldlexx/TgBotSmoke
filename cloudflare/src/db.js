@@ -27,9 +27,15 @@ export class Database {
     const l=local(now,p.timezone);
     return l.clock>=p.report_time?[this.stmt("INSERT OR IGNORE INTO reports(user_id,local_date,status,created_at) VALUES (?,?,'skipped',?)",id,l.day,stamp(now))]:[];
   }
+  async nextReportDue(id,zone,clock,now) {
+    const day=local(now,zone).day;
+    const used=await this.one('SELECT 1 FROM reports WHERE user_id=? AND local_date=?',id,day);
+    return nextDue(now,zone,clock,used?day:null);
+  }
   async register(id,chat,p,now) {
-    await this.batch([this.stmt('INSERT INTO users(user_id,chat_id,daily,price,currency,pack,minutes,timezone,report_time,next_due_at) VALUES (?,?,?,?,?,?,?,?,?,?)',id,chat,...['daily','price','currency','pack','minutes','timezone','report_time'].map(k=>p[k]),nextDue(now,p.timezone,p.report_time)),this.newStreak(id,p.start,p),...this.skip(id,p,now)]);
-    if(this.plan){this.registered={...p,user_id:id,chat_id:chat,enabled:1};this.registeredStreak={...p,user_id:id,id:-1,end:null};}
+    const enabled=p.enabled===1?1:0,due=enabled?nextDue(now,p.timezone,p.report_time):null;
+    await this.batch([this.stmt('INSERT INTO users(user_id,chat_id,daily,price,currency,pack,minutes,timezone,report_time,enabled,next_due_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',id,chat,...['daily','price','currency','pack','minutes','timezone','report_time'].map(k=>p[k]),enabled,due),this.newStreak(id,p.start,p),...(enabled?this.skip(id,p,now):[])]);
+    if(this.plan){this.registered={...p,user_id:id,chat_id:chat,enabled,next_due_at:due};this.registeredStreak={...p,user_id:id,id:-1,end:null};}
   }
   awardStatements(id,streaks,now) {
     const list=[];
@@ -67,7 +73,8 @@ export class Database {
       if(['daily','pack','minutes'].includes(field)) stmts.push(this.stmt(`UPDATE streaks SET ${field}=? WHERE id=?`,value,active.id));
       if(['report_time','timezone'].includes(field)) {
         const changed={...p,[field]:value};
-        stmts.push(...this.skip(id,changed,now),this.stmt('UPDATE users SET next_due_at=? WHERE user_id=?',p.enabled?nextDue(now,changed.timezone,changed.report_time):null,id),this.stmt('DELETE FROM report_retries WHERE user_id=?',id));
+        const due=p.enabled?await this.nextReportDue(id,changed.timezone,changed.report_time,now):null;
+        stmts.push(...(p.enabled?this.skip(id,changed,now):[]),this.stmt('UPDATE users SET next_due_at=? WHERE user_id=?',due,id),this.stmt('DELETE FROM report_retries WHERE user_id=?',id));
         stmts.push(this.stmt("UPDATE reports SET status='cancelled' WHERE user_id=? AND status='retry'",id));
       }
     }
@@ -77,7 +84,7 @@ export class Database {
     let b=minute(began),l=minute(last);
     if(l<b||l>minute(now)) throw new ValidationError('Последняя сигарета должна быть не раньше начала срыва и не в будущем.');
     const active=(await this.streaks(id)).at(-1);
-    if(active.id!==streakId||active.end) throw new ValidationError('Серия уже изменилась. Откройте настройки заново.');
+    if(active.id!==streakId||active.end) throw new ValidationError('Серия уже изменилась. Открой настройки заново.');
     if(b<minute(active.start)) throw new ValidationError('Начало срыва не может быть раньше начала текущей серии.');
     b=Math.max(b,+new Date(active.start));l=Math.max(l,b);
     await this.batch([...this.awardStatements(id,[active],b),this.stmt('UPDATE streaks SET end=?,lapse_count=? WHERE id=?',stamp(b),count,active.id),this.newStreak(id,stamp(l),await this.user(id))]);
@@ -93,9 +100,12 @@ export class Database {
     if(!state) return this.run('DELETE FROM fsm WHERE key=?',this.fsmKey(id,botId));
     await this.run('INSERT INTO fsm VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET state=excluded.state,data=excluded.data',this.fsmKey(id,botId),state,JSON.stringify(rest));
   }
-  async notifications(id,enabled,now) {
+  async notifications(id,enabled,now,clock) {
     const p=await this.user(id);
-    await this.batch([this.stmt('UPDATE users SET enabled=?,next_due_at=? WHERE user_id=?',enabled?1:0,enabled?nextDue(now,p.timezone,p.report_time):null,id),this.stmt('DELETE FROM report_retries WHERE user_id=?',id),this.stmt("UPDATE reports SET status='cancelled' WHERE user_id=? AND status='retry'",id),...(enabled?this.skip(id,p,now):[])]);
+    const report_time=clock??p.report_time;
+    const next_due_at=enabled?await this.nextReportDue(id,p.timezone,report_time,now):null;
+    await this.batch([this.stmt('UPDATE users SET enabled=?,report_time=?,next_due_at=? WHERE user_id=?',enabled?1:0,report_time,next_due_at,id),this.stmt('DELETE FROM report_retries WHERE user_id=?',id),this.stmt("UPDATE reports SET status='cancelled' WHERE user_id=? AND status='retry'",id),...(enabled?this.skip(id,{...p,report_time},now):[])]);
+    return {...p,enabled:enabled?1:0,report_time,next_due_at};
   }
   async deleteAccount(id,botId,subject,now) {
     this.deleting=true;

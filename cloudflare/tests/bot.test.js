@@ -143,8 +143,8 @@ test('registration, schedule updates and retry dedup',async()=>{
 });
 test('all eight screens, emitted button links and account setup work end to end',async()=>{
   const {db,env}=database();
-  let seq=0,last;
-  const api=async(_,method,body)=>{if(method==='sendMessage')last=body;};
+  let seq=0,last,keyboard;
+  const api=async(_,method,body)=>{if(method==='sendMessage'){last=body;if(body.reply_markup?.keyboard)keyboard=body.reply_markup.keyboard;}};
   const send=text=>handleUpdate(message(42,++seq,text),db,env,now,api);
   const cb=data=>handleUpdate(callback(42,++seq,data),db,env,now,api);
   const click=async label=>{
@@ -153,20 +153,25 @@ test('all eight screens, emitted button links and account setup work end to end'
     await cb(button.callback_data);
   };
   const press=async label=>{
-    assert(last.reply_markup.keyboard.flat().some(b=>b.text===label),label);
+    assert(keyboard.flat().some(b=>b.text===label),label);
     await send(label);
   };
   await send('/start');
-  await press('📅 Указать дату и время');
+  assert.match(last.text,/Бесплатно\. Без рекламы\. Без осуждения\./);
+  await click('🔐 О моих данных');assert.match(last.text,/Сохраняем Telegram ID/);
+  await send('/start');await click('🚭 Начать');
+  await click('Указать дату и время');
   await send('01.01.1899 10:00');assert.match(last.text,/1900/);
   await send('01.01.2026 10:00');
-  await press('Другое');await send('18');
+  await click('Другое');await send('18');
   await send('250');
   assert.equal(await db.user(42),null);
-  await press('Europe/Moscow');
-  assert.match(last.text,/Всё готово/);
+  await click('Москва (UTC+3)');
+  assert.match(last.text,/Ежедневный отчёт/);
   const user=await db.user(42);
   assert.deepEqual([user.daily,user.price,user.currency,user.timezone,user.pack,user.minutes,user.report_time],[18,'250','RUB','Europe/Moscow',20,'5','08:00']);
+  assert.equal(user.enabled,0);assert.equal(user.next_due_at,null);
+  await click('Не сейчас');
   assert.equal(await db.state(42,123456).then(s=>s.state),undefined);
   await press(A.MENU_LABELS[0]);assert.match(last.text,/Мой прогресс/);
   await click('🏆 Все достижения');assert.match(last.text,/Получено: 8 из 9/);
@@ -181,7 +186,7 @@ test('all eight screens, emitted button links and account setup work end to end'
   await click('✅ Отпустило');assert.match(last.text,/Серия продолжается/);
   await send(A.MENU_LABELS[3]);await click('🚬 Был срыв');
   await click('Указать другое время или количество');
-  await send('15.11.2026 19:00');await press('3');await send('15.11.2026 18:00');
+  await send('15.11.2026 19:00');await click('3');await send('15.11.2026 18:00');
   assert.match(last.text,/не раньше первой/);
   await send('15.11.2026 20:00');
   const {nonce}=await db.state(42,123456);
@@ -196,15 +201,16 @@ test('all eight screens, emitted button links and account setup work end to end'
   await send(A.MENU_LABELS[2]);assert.match(last.text,/Получено: 8 из 9/);
   assert.match(last.text,/💎 Три месяца/);
   await send(A.MENU_LABELS[4]);assert.match(last.text,/⚙️ Настройки/);
-  await click('⏰ Уведомления');await click('🔕 Отключить рассылку');
+  await click('⏰ Уведомления');await click('🔔 Подключить отчёты');await click('07:00');
+  await send(A.MENU_LABELS[4]);await click('⏰ Уведомления');await click('🔕 Отключить рассылку');
   assert.equal((await db.user(42)).next_due_at,null);
-  await click('🔔 Включить рассылку');assert((await db.user(42)).next_due_at>now);
-  await click('🕒 Изменить время');await send('06:00');
+  await click('🔔 Подключить отчёты');await click('08:00');assert((await db.user(42)).next_due_at>now);
+  await send(A.MENU_LABELS[4]);await click('⏰ Уведомления');await click('🕒 Изменить время');await send('06:00');
   await send(A.MENU_LABELS[4]);await click('💰 Стоимость');await send('6 EUR');
   await send(A.MENU_LABELS[4]);await click('📦 Размер пачки');await send('25');
   await send(A.MENU_LABELS[4]);await click('🚭 Дата отказа');await send('15.11.2026 20:30');
-  await send(A.MENU_LABELS[4]);await click('🚬 Привычка');await press('20');
-  await send(A.MENU_LABELS[4]);await click('⏳ Минут на сигарету');await press('7');
+  await send(A.MENU_LABELS[4]);await click('🚬 Привычка');await click('20');
+  await send(A.MENU_LABELS[4]);await click('⏳ Минут на сигарету');await click('7');
   await send(A.MENU_LABELS[4]);await click('🌍 Часовой пояс');await send('Europe/Berlin');
   const edited=await db.user(42);
   assert.deepEqual([edited.price,edited.currency,edited.pack,edited.daily,edited.minutes,edited.timezone,edited.report_time],['6','EUR',25,20,'7','Europe/Berlin','06:00']);
@@ -219,7 +225,10 @@ test('registration corrects an ambiguous civil time and supports the now shortcu
   const {db,env}=database();
   const send=(id,text)=>handleUpdate(message(id,1,text),db,env,now,async()=>{});
   for(const [id,start] of [[42,'25.10.2026 02:30'],[43,'🚭 Сейчас']]) {
-    for(const value of ['/start',start,'20','5,50 EUR','Europe/Berlin'])await send(id,value);
+    await send(id,'/start');
+    const {nonce}=await db.state(id,123456);
+    await handleUpdate(callback(id,2,`f:${nonce}:begin`),db,env,now,async()=>{});
+    for(const value of [start,'20','5,50 EUR','Europe/Berlin'])await send(id,value);
   }
   assert.equal(await db.user(42),null);
   assert.equal((await db.state(42,123456)).date_final,true);
@@ -227,6 +236,117 @@ test('registration corrects an ambiguous civil time and supports the now shortcu
   assert.equal(Date.parse((await db.streaks(42))[0].start),Date.parse('2026-10-25T00:30Z'));
   assert.equal((await db.user(42)).price,'5.50');
   assert.equal(Date.parse((await db.streaks(43))[0].start),Math.floor(now/60000)*60000);
+});
+
+function conversation(db,env,id,time=now) {
+  const replies=[];
+  let seq=0;
+  const api=async(_,method,body)=>{if(method==='sendMessage')replies.push(body);};
+  const send=text=>handleUpdate(message(id,++seq,text,time),db,env,time,api);
+  const cb=action=>handleUpdate(callback(id,++seq,action,time),db,env,time,api);
+  const last=()=>replies.at(-1);
+  const button=label=>{
+    const found=last().reply_markup?.inline_keyboard?.flat().find(b=>b.text===label);
+    assert(found,label);assert(Buffer.byteLength(found.callback_data)<=64);
+    return found.callback_data;
+  };
+  return {send,cb,click:label=>cb(button(label)),button,last,replies};
+}
+
+test('onboarding resumes existing drafts; every step can go back and cancel',async()=>{
+  const {db,env}=database();
+  const fields=['start','daily','cost','timezone'];
+  const values=['Сейчас','18','250'];
+  for(let i=0;i<fields.length;i++) {
+    const id=600+i,chat=conversation(db,env,id);
+    await chat.send('/start');await chat.click('🚭 Начать');
+    for(const value of values.slice(0,i))await chat.send(value);
+    assert.match(chat.last().text,new RegExp(`Шаг ${i+1} из 4`));
+    const oldCancel=chat.button('Отмена');
+    await chat.send('/start');
+    assert.equal((await db.state(id,123456)).field,fields[i]);
+    await chat.cb(oldCancel);assert.match(chat.last().text,/устарела/);
+    assert.equal((await db.state(id,123456)).field,fields[i]);
+    await chat.send('/start');await chat.click('Назад');
+    if(i) {
+      assert.equal((await db.state(id,123456)).field,fields[i-1]);
+      await chat.send(values[i-1]);await chat.click('Отмена');
+    } else {
+      assert.equal((await db.state(id,123456)).state,'Form:welcome');
+      await chat.click('🚭 Начать');await chat.click('Отмена');
+    }
+    assert.equal((await db.state(id,123456)).state,'Form:welcome');
+    assert.equal(await db.user(id),null);
+  }
+  await db.saveState(610,123456,{state:'Form:value',mode:'register',field:'cost',draft:{...profile,enabled:undefined}});
+  const legacy=conversation(db,env,610);
+  await legacy.send('/start');assert.match(legacy.last().text,/Шаг 3 из 4/);
+  await legacy.send('7 EUR');await legacy.click('Другой город');
+  await legacy.send('НетТакогоГорода');assert.match(legacy.last().text,/Неизвестный пояс/);legacy.button('Назад');legacy.button('Отмена');
+  await legacy.send('Berlin');
+  assert.equal((await db.user(610)).timezone,'Europe/Berlin');assert.equal((await db.user(610)).daily,20);
+  assert.equal((await db.user(610)).enabled,0);
+});
+
+test('relative date uses the chosen civil day and manual forms keep navigation',async()=>{
+  const {db,env}=database();
+  const time=Date.parse('2026-11-16T20:05Z');
+  const chat=conversation(db,env,620,time);
+  await chat.send('/start');await chat.click('🚭 Начать');await chat.click('Вчера');
+  await chat.send('25:00');assert.match(chat.last().text,/от 0:00 до 23:59/);chat.button('Назад');chat.button('Отмена');
+  await chat.send('6:00');await chat.click('Другое');
+  await chat.send('0');assert.match(chat.last().text,/от 1 до 200/);chat.button('Назад');chat.button('Отмена');
+  await chat.send('20');await chat.send('250');await chat.click('Владивосток (UTC+10)');
+  assert.equal(Date.parse((await db.streaks(620))[0].start),Date.parse('2026-11-15T20:00Z'));
+  assert(chat.replies.some(reply=>reply.reply_markup?.keyboard));
+  assert.match(chat.replies.at(-2).text,/Мой прогресс/);
+  await chat.click('Не сейчас');assert.equal((await db.user(620)).next_due_at,null);
+});
+
+test('each report preset saves immediately; manual and existing subscriptions keep correct scheduling',async()=>{
+  const {db,env}=database();await db.run("UPDATE cloud_control SET value='1' WHERE key='active'");
+  for(const [index,clock] of ['06:00','07:00','08:00','09:00','10:00','12:00'].entries()) {
+    const id=630+index,chat=conversation(db,env,id);
+    await db.register(id,id,{...profile,enabled:0},now);
+    await chat.cb('notifications');await chat.click('🔔 Подключить отчёты');await chat.click(clock);
+    assert.equal((await db.user(id)).report_time,clock);
+    assert.equal((await db.user(id)).enabled,1);assert((await db.user(id)).next_due_at>now);
+    assert.equal((await db.state(id,123456)).state,undefined);
+    assert.match(chat.last().text,/Ежедневный отчёт подключён/);
+  }
+  const id=650,chat=conversation(db,env,id);
+  await db.register(id,id,{...profile,enabled:0},now);
+  await chat.cb('notifications');await chat.click('🕒 Изменить время');await chat.click('🕒 Указать своё время');
+  await chat.send('24:00');assert.match(chat.last().text,/от 0:00 до 23:59/);chat.button('Назад');chat.button('Отмена');
+  await chat.send('6:00');
+  let user=await db.user(id);assert.deepEqual([user.enabled,user.report_time,user.next_due_at],[0,'06:00',null]);
+  await chat.cb('notifications');await chat.click('🔔 Подключить отчёты');await chat.click('🕒 Указать своё время');
+  await chat.send('6:00');assert.equal((await db.user(id)).enabled,1);
+  await db.run("UPDATE reports SET status='sent' WHERE user_id=?",id);
+  await chat.cb('notifications');await chat.click('🕒 Изменить время');await chat.click('🕒 Указать своё время');await chat.send('18:30');
+  user=await db.user(id);
+  assert.deepEqual([user.enabled,user.report_time,user.timezone,user.next_due_at],[1,'18:30','Europe/Moscow',Date.parse('2026-11-17T15:30:00Z')]);
+  assert.match(chat.last().text,/Следующий отчёт: 17\.11\.2026, 18:30/);
+  const today=[];await tick(env,Date.parse('2026-11-16T15:31Z'),async(_,__,body)=>today.push(body.chat_id));assert(!today.includes(id));
+  const before={user,streaks:await db.streaks(id),awards:await db.awards(id,now)};
+  await chat.send('/start');
+  assert.deepEqual({user:await db.user(id),streaks:await db.streaks(id),awards:await db.awards(id,now)},before);
+  await db.run("UPDATE cloud_control SET value='0' WHERE key='active'");
+  await chat.cb('notifications');assert.doesNotMatch(chat.last().text,/Следующий отчёт:/);
+});
+
+test('permanent menu exits a manual form with one response and invalidates its buttons',async()=>{
+  const {db,env}=database();await db.register(660,660,profile,now);
+  const chat=conversation(db,env,660);
+  await chat.cb('edit:start');await chat.click('Указать дату и время');
+  const stale=chat.button('Отмена'),before=chat.replies.length;
+  await chat.send(A.MENU_LABELS[0]);
+  assert.equal(chat.replies.length,before+1);assert.match(chat.last().text,/Мой прогресс/);
+  await chat.cb('edit:daily');const state=await db.state(660,123456);
+  await chat.cb(stale);assert.match(chat.last().text,/устарела/);
+  assert.deepEqual(await db.state(660,123456),state);
+  await chat.cb('edit:daily');await chat.click('Главное меню');
+  assert.match(chat.last().text,/Мой прогресс/);assert.equal((await db.state(660,123456)).state,undefined);
 });
 test('cron disabled until cutover, 429 and timeout retries are bounded',async()=>{
   const {db,env}=database();await db.register(1,1,profile,now-86400000);let count=0;

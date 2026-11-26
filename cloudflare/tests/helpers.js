@@ -30,7 +30,7 @@ export function database({legacy=false}={}) {
   return {env,db:new Database(env.DB),sql,metrics,fail:()=>{failNext=true;}};
 }
 export const now=Date.parse('2026-11-16T09:00:59Z');
-export const profile={daily:20,price:'250',currency:'RUB',pack:20,minutes:'5',timezone:'Europe/Moscow',report_time:'08:00',start:'2026-01-01T07:00:00+00:00'};
+export const profile={daily:20,price:'250',currency:'RUB',pack:20,minutes:'5',timezone:'Europe/Moscow',report_time:'08:00',start:'2026-01-01T07:00:00+00:00',enabled:1};
 export const request=(update,secret='test-secret')=>new Request('https://example.test/telegram',{method:'POST',headers:{'content-type':'application/json','X-Telegram-Bot-Api-Secret-Token':secret},body:JSON.stringify(update)});
 export const message=(id,seq,text,time=now)=>({update_id:seq,message:{message_id:seq,date:Math.floor(time/1000),from:{id},chat:{id,type:'private'},text}});
 export const callback=(id,seq,data,time=now)=>({update_id:seq,callback_query:{id:String(seq),from:{id},data,message:{message_id:seq,date:Math.floor(time/1000),chat:{id,type:'private'}}}});

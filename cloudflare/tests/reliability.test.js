@@ -150,10 +150,13 @@ test('outbox survives 5xx; duplicate webhook never repeats business action or su
 test('expired answerCallbackQuery does not block setting changes; /start preserves opt-out',async()=>{
   const {db,env}=database();await active(db);await db.register(103,103,profile,now);
   const api=async(_,method)=>{if(method==='answerCallbackQuery')throw new DeliveryError(400);};
-  assert.equal((await webhook(request(callback(103,1003,'notify:off')),env,now,api)).status,200);
+  const click=(seq,action,time=now)=>webhook(request(callback(103,seq,action,time)),env,time,api);
+  await click(10031,'notifications');
+  assert.equal((await click(1003,`f:${(await db.state(103,123456)).nonce}:off`)).status,200);
   assert.equal((await db.user(103)).enabled,0);assert.equal((await db.user(103)).next_due_at,null);
   await webhook(request(message(103,1004,'/start')),env,now+11000,api);assert.equal((await db.user(103)).enabled,0);
-  await webhook(request(callback(103,1005,'notify:on',now+22000)),env,now+22000,api);
+  await click(1005,'notify:on',now+22000);
+  await click(10051,`f:${(await db.state(103,123456)).nonce}:v06:00`,now+22000);
   assert.equal((await db.user(103)).enabled,1);assert((await db.user(103)).next_due_at>now);
 });
 test('delete erases related data, cancels pending replies and rejects old events after fresh /start',async()=>{
@@ -169,10 +172,48 @@ test('delete erases related data, cancels pending replies and rejects old events
   await webhook(request(message(104,1008,'/start',now)),env,now+22000,api);
   assert.equal((await db.state(104,123456)).state,undefined);
   await webhook(request(message(104,1009,'/start',now+33000)),env,now+33000,api);
-  assert.equal((await db.state(104,123456)).mode,'register');
+  assert.equal((await db.state(104,123456)).state,'Form:welcome');
   await webhook(request(callback(104,1010,'lapse',now)),env,now+44000,api);
-  assert.equal((await db.state(104,123456)).mode,'register');
+  assert.equal((await db.state(104,123456)).state,'Form:welcome');
   assert.equal(await db.user(104),null);
+});
+
+test('webhook onboarding updates /admin counts only after opt-in and deduplicates report setup',async()=>{
+  const {db,env}=database();await active(db);env.OWNER_CHAT_ID='701';
+  let seq=700,time=now;
+  const replies=[];
+  const api=async(_,method,body)=>{if(method==='sendMessage')replies.push(body);};
+  const send=async(id,text)=>{
+    time+=11000;
+    assert.equal((await webhook(request(message(id,++seq,text,time)),env,time,api)).status,200);
+  };
+  const cb=async action=>{
+    time+=11000;
+    const update=callback(700,++seq,action,time);
+    assert.equal((await webhook(request(update),env,time,api)).status,200);
+    return update;
+  };
+  await send(700,'/start');
+  await cb(`f:${(await db.state(700,123456)).nonce}:begin`);
+  for(const value of ['Сейчас','10','250','Europe/Moscow'])await send(700,value);
+  const profileBefore=await db.user(700);
+  assert.equal(profileBefore.enabled,0);assert.equal(profileBefore.next_due_at,null);
+  assert.equal(await db.one('SELECT 1 FROM reports WHERE user_id=700'),null);
+  await send(701,'/admin');
+  assert.match(replies.at(-1).text,/Завершили регистрацию: 1\n🔔 Включили уведомления: 0\n📨 Могут получать автоматические отчёты: 0/);
+  const select=`f:${(await db.state(700,123456)).nonce}:v06:00`;
+  const update=await cb(select);
+  assert.match(replies.at(-1).text,/Ежедневный отчёт подключён/);
+  const optedIn=await db.user(700);
+  assert.deepEqual({...optedIn},{...profileBefore,enabled:1,report_time:'06:00',next_due_at:nextDue(time,'Europe/Moscow','06:00')});
+  const count=replies.length;
+  assert.equal((await webhook(request(update),env,time,api)).status,200);
+  assert.equal(replies.length,count);
+  await cb(select);
+  assert.match(replies.at(-1).text,/устарела/);
+  assert.deepEqual(await db.user(700),optedIn);
+  await send(701,'/admin');
+  assert.match(replies.at(-1).text,/Завершили регистрацию: 1\n🔔 Включили уведомления: 1\n📨 Могут получать автоматические отчёты: 1/);
 });
 test('confirmed lapse is idempotent across Telegram redeliveries and distinct duplicate callbacks',async()=>{
   const {db,env}=database();await active(db);await db.register(105,105,profile,now-86400000);const api=async()=>{};
