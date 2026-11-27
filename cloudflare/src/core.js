@@ -136,6 +136,7 @@ const awards={
   365:['👑','Год','Целый год без сигарет!']
 };
 const daysText=d=>compactDuration(d*day,true);
+const bar=(percent,cells)=>`${'▰'.repeat(cells)}${'▱'.repeat(10-cells)} <b>${percent}%</b>`;
 export const currencySymbol=currency=>({RUB:'₽',USD:'$',EUR:'€'})[currency]||currency;
 export const dateLabel=(value,zone)=>{
   const {day,clock}=local(value,zone);
@@ -157,7 +158,7 @@ function goal(seconds) {
   const left=next*day-seconds;
   return [`🎯 Следующий рубеж — <b>${daysText(next)}</b>`,
     `Участок: ${from?daysText(from):'старт'} → ${daysText(next)}`,
-    `${'▰'.repeat(cells)}${'▱'.repeat(10-cells)} <b>${percent}%</b>`,
+    bar(percent,cells),
     `До рубежа — <b>${left<3600?'меньше часа':compactDuration(left,true)}</b>`].join('\n');
 }
 const series=seconds=>`<b>${compactDuration(seconds,true)} без сигарет</b>`;
@@ -199,10 +200,16 @@ export function detailedProgressReport(s,earned) {
     [awardCount(earned),...collection].join('\n')].join('\n\n');
 }
 export function awardsReport(seconds,earned) {
-  const locked=milestones.find(d=>!earned.has(d));
-  const collection=milestones.map(d=>`${earned.has(d)?awards[d][0]:'🔒'} ${awards[d][1]}`).join('\n');
-  const next=locked?`🎯 Следующая награда — ${awards[locked][1]}\n⏳ До неё — ${compactDuration(locked*day-seconds,true)}`:'Все награды получены! 🎉';
-  return `<b>🏆 Все достижения</b>\n\nПолучено: ${earned.size} из ${milestones.length}\n\n${collection}\n\n${next}`;
+  const received=milestones.filter(d=>earned.has(d)),future=milestones.filter(d=>!earned.has(d));
+  const percent=Math.round(received.length*100/milestones.length);
+  const label=d=>`${d===1?'24 часа':daysText(d)} — ${awards[d][1]}`;
+  return ['🏆 <b>Твои достижения</b>',`<b>${received.length} из ${milestones.length} наград</b>`,
+    bar(percent,Math.round(received.length*10/milestones.length)),
+    'Достигнутые рубежи сохраняются после срыва.',
+    received.length?`✅ <b>Полученные награды</b>\n${received.map(d=>`${awards[d][0]} ${label(d)}`).join('\n')}`:'',
+    future.length?`🎯 <b>Впереди</b>\n${future.map((d,i)=>`🔒 ${i?label(d):`<b>${label(d)}</b>`}`).join('\n')}`:'🎉 Коллекция собрана!',
+    future.length?`🎁 До следующей награды — <b>${compactDuration(future[0]*day-seconds,true)}</b>`:''
+  ].filter(Boolean).join('\n\n');
 }
 export function cravingReport(s) {
   return `<b>🆘 Хочу закурить</b>\n\n🚭 ${series(s.current_seconds)}\n\n${totals(s,'Освобождено')}\n\n`+

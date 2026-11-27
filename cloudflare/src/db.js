@@ -1,4 +1,5 @@
 import {local,minute,stamp,milestones,A,nextDue,ValidationError} from './core.js';
+import {validateHistoryChange} from './history.js';
 export class Database {
   constructor(db) {this.db=db;}
   stmt(sql,...args) {return this.db.prepare(sql).bind(...args);}
@@ -88,6 +89,23 @@ export class Database {
     if(b<minute(active.start)) throw new ValidationError('Начало срыва не может быть раньше начала текущей серии.');
     b=Math.max(b,+new Date(active.start));l=Math.max(l,b);
     await this.batch([...this.awardStatements(id,[active],b),this.stmt('UPDATE streaks SET end=?,lapse_count=? WHERE id=?',stamp(b),count,active.id),this.newStreak(id,stamp(l),await this.user(id))]);
+  }
+  async changeHistory(id,change,now) {
+    const {first,second,updated,following}=validateHistoryChange(await this.streaks(id),change,now);
+    const datesChanged=change.kind==='remove'||(following?updated.end!==first.end||following.start!==second.start:updated.start!==first.start);
+    if(!datesChanged&&(!following||updated.lapse_count===first.lapse_count))return;
+    const statements=[];
+    if(change.kind==='remove')statements.push(this.stmt('DELETE FROM streaks WHERE user_id=? AND id=?',id,first.id));
+    if(following) {
+      statements.push(this.stmt('UPDATE streaks SET end=?,lapse_count=? WHERE user_id=? AND id=?',updated.end,updated.lapse_count,id,first.id),
+        this.stmt('UPDATE streaks SET start=? WHERE user_id=? AND id=?',following.start,id,second.id));
+    }else statements.push(this.stmt('UPDATE streaks SET start=? WHERE user_id=? AND id=?',updated.start,id,updated.id));
+    if(datesChanged) {
+      // A final rejection after multiple attempts can still follow an ambiguous send.
+      statements.push(this.stmt("UPDATE reports SET milestone=NULL WHERE user_id=? AND status IN ('rejected','blocked') AND attempts=1 AND milestone IS NOT NULL",id));
+      statements.push(...this.awardStatements(id,following?[updated,following]:[updated],now));
+    }
+    await this.batch(statements);
   }
   fsmKey(id,botId) {return '['+[botId,id,id,null,null,'default'].map(v=>JSON.stringify(v)).join(', ')+']';}
   async state(id,botId) {

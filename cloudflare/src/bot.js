@@ -3,6 +3,7 @@ import {
   healthReport,methodologyReport,progressReport,detailedProgressReport,awardsReport,cravingReport,menu,buttons,
   settings,dateLabel,zoneLabel,cities,currencySymbol,DEFAULTS,PRIVACY,RECOVERY_LABEL,ValidationError
 } from './core.js';
+import {historyReport,seriesReport,episodeReport,episodeFields,historyTarget,historySnapshot,validateHistoryChange} from './history.js';
 export class DeliveryError extends Error {constructor(code,retry=0){super(`Telegram ${code}`);this.code=code;this.retry=retry;}}
 export async function telegram(env,method,body) {
   // Never propagate fetch errors: they may contain the token-bearing URL.
@@ -19,6 +20,7 @@ const registerSteps=['start','daily','cost','timezone'];
 const reportTimes=['06:00','07:00','08:00','09:00','10:00','12:00'];
 const timezones=Object.keys(cities);
 const nonce=()=>crypto.randomUUID().replaceAll('-','');
+const historyPageSize=5;
 const formPrompts={
   daily:'Сколько сигарет в день было обычно?',
   cost:'Сколько стоила пачка? Например, 250 ₽ или 5,50 EUR. Если указать только сумму, считаем в ₽.',
@@ -65,6 +67,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   };
   const cancel=async()=>{
     if(!user)return welcome();
+    if(data.mode==='history')return exitHistory();
     await clear();return send('Ввод отменён.',menu());
   };
   const stats=async()=>calculate(await db.streaks(id),now);
@@ -72,7 +75,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   const progressLink=[[A.MENU_LABELS[0],'progress']];
   const methodLink=[['ℹ️ Как считаем','report:methodology']];
   const progress=async()=>send(progressReport(await stats(),await earned()),buttons(
-    [['📊 Подробная статистика','progress:details']],methodLink,[['📝 Отметить срыв','lapse']]
+    [['📊 Подробная статистика','progress:details']],[['📅 История','history'],...methodLink],[['📝 Отметить срыв','lapse']]
   ));
   const detailedProgress=async()=>send(detailedProgressReport(await stats(),await earned()),buttons(methodLink,progressLink));
   const home=async()=>{
@@ -80,6 +83,74 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     await clear();await send('🚭 <b>НЕ КУРЮ</b>',menu());return progress();
   };
   const achievements=async()=>send(awardsReport((await stats()).current_seconds,await earned()),buttons([['📊 Мой прогресс','progress']]));
+  const showHistory=async()=>{
+    const rows=await db.streaks(id);
+    if(!rows.length)return send('История пока недоступна.',buttons(progressLink));
+    return send(historyReport(rows,user.timezone,now),buttons(
+      [['Исправить начальную дату','history:initial']],
+      ...(rows.length>1?[[['Срывы','history:lapses:0']]]:[]),
+      [['📝 Отметить срыв','lapse']], [['Серии без сигарет','history:series:0']], [['Назад','progress']]));
+  };
+  const historyPage=async(kind,requested)=>{
+    const rows=await db.streaks(id),series=kind==='series';
+    const items=(series?rows:rows.slice(0,-1)).map((row,index)=>({row,index})).reverse();
+    const last=Math.max(0,Math.ceil(items.length/historyPageSize)-1);
+    const page=Math.min(last,Math.max(0,requested)),itemsOnPage=items.slice(page*historyPageSize,(page+1)*historyPageSize);
+    const text=series?itemsOnPage.map(({row})=>seriesReport(row,user.timezone,now)).join('\n\n')
+      :itemsOnPage.map(({row,index})=>episodeReport({first:row,second:rows[index+1],index},user.timezone)).join('\n\n');
+    const controls=[];
+    if(page)controls.push(['←',`history:${kind}:${page-1}`]);
+    if(page<last)controls.push(['→',`history:${kind}:${page+1}`]);
+    return send(`📅 <b>${series?'Серии без сигарет':'Срывы'}</b>\n\n${text||(series?'Пока нет серий.':'Срывов не зарегистрировано.')}`+
+      (last?`\n\nСтраница ${page+1} из ${last+1}`:''),buttons(
+      ...(!series?itemsOnPage.map(({row,index})=>[[`Открыть срыв №${index+1}`,`history:episode:${row.id}`]]):[]),
+      ...(controls.length?[controls]:[]),[['Назад','history']]));
+  };
+  const episode=async(key,notice='')=>{
+    const rows=await db.streaks(id);
+    try {
+      const target=historyTarget(rows,'edit',key),page=Math.floor((rows.length-2-target.index)/historyPageSize);
+      return send((notice?esc(notice)+'\n\n':'')+episodeReport(target,user.timezone),buttons(
+        [['Исправить','history:edit:'+key],['Удалить','history:remove:'+key]],[['Назад','history:lapses:'+page]]));
+    }catch(e) {if(!(e instanceof ValidationError))throw e;return send(esc(e.message),buttons([['📅 История','history']]));}
+  };
+  const exitHistory=async()=>{
+    const {kind,key}=data.change;
+    await clear();return kind==='initial'?showHistory():episode(key);
+  };
+  const historyFields=async(next,notice='')=>{
+    await save({...next,state:'Form:historyFields',field:undefined,input:undefined,relative_date:undefined,nonce:nonce()});
+    const {begin,last,count}=data.change;
+    return send((notice?esc(notice)+'\n\n':'')+'✏️ <b>Исправление срыва</b>\n\n'+episodeFields(begin,last,count,data.timezone),buttons(
+      [pick('Первая сигарета','first')],[pick('Последняя сигарета','last')],[pick('Количество сигарет','count')],
+      [pick('Проверить изменения','review')],nav()));
+  };
+  const reviewHistory=async next=>{
+    const {change,timezone}=next,rows=await db.streaks(id);
+    if(timezone!==user.timezone)throw new ValidationError('Часовой пояс изменился. Открой историю заново.');
+    const {first,second,index}=historyTarget(rows,change.kind,change.key);
+    validateHistoryChange(rows,change,now);
+    await save({...next,state:'Form:historyReview',nonce:nonce()});
+    if(change.kind==='remove')return send(episodeReport({first,second,index},timezone)+
+      '\n\nУдалить эту запись? Соседние серии объединятся, и статистика будет пересчитана.',
+      buttons([pick('Подтвердить удаление','commit')],nav()));
+    const render=change.kind==='initial'
+      ?`<b>Было</b>\n${dateLabel(first.start,timezone)}\n\n<b>Будет</b>\n${dateLabel(change.start,timezone)}`
+      :`Срыв №${index+1}\n\n<b>Было</b>\n${episodeFields(first.end,second.start,first.lapse_count,timezone)}\n\n<b>Будет</b>\n${episodeFields(change.begin,change.last,change.count,timezone)}`;
+    return send('✏️ <b>Проверь изменения</b>\n\n'+render,buttons([pick('Сохранить изменения','commit')],nav()));
+  };
+  const beginHistory=async(kind,key)=>{
+    const rows=await db.streaks(id);
+    try {
+      const target=historyTarget(rows,kind,kind==='initial'?rows[0]?.id:key);
+      const {first,second}=target;
+      const next={mode:'history',timezone:user.timezone,change:{kind,key:first.id,snapshot:historySnapshot(target),
+        ...(second?{begin:first.end,last:second.start,count:first.lapse_count}:{}),...(kind==='initial'?{start:first.start}:{})}};
+      if(kind==='initial')return step({...next,field:'start',input:true});
+      if(kind==='edit')return historyFields(next);
+      return await reviewHistory(next);
+    }catch(e) {if(!(e instanceof ValidationError))throw e;return kind==='initial'?send(esc(e.message),buttons([['📅 История','history']])):episode(key,e.message);}
+  };
   const health=async(all=false)=>send(healthReport((await stats()).current_seconds,all),all
     ?buttons([[RECOVERY_LABEL,'report:health']],progressLink)
     :buttons([['✅ Все достигнутые изменения','health:all']],progressLink));
@@ -103,7 +174,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       text=input?timeInput:`<b>🔔 ${editing?'Время ежедневного отчёта':'Ежедневный отчёт'}</b>\n\n${editing?'Выбери новое время. Состояние подписки сохранится.':'Во сколько тебе удобно получать отчёт о своём прогрессе?'}\n\n🌍 Часовой пояс: ${esc(zoneLabel(user.timezone))}\n\nВремя всегда можно изменить в настройках.`;
       if(!input)rows=[reportTimes.slice(0,3).map(value=>pick(value,'v'+value)),reportTimes.slice(3).map(value=>pick(value,'v'+value)),[pick('🕒 Указать своё время','manual')],...(!editing?[[pick('Не сейчас','later')]]:[])];
     }else if(['start','lapse_begin','lapse_last'].includes(field)) {
-      const question=field==='start'?'Когда была последняя сигарета?':formPrompts[field];
+      const question=field==='start'?(mode==='history'?'Когда началось отслеживание?':'Когда была последняя сигарета?'):formPrompts[field];
       text=question+'\n'+(relative_date?timeInput:dateInput)+(zone&&(mode!=='register'||date_final)?`\nЧасовой пояс: ${esc(zoneLabel(zone))}.`:'');
       if(!input)rows=[[pick('Сейчас','vСейчас'),pick('Сегодня','today')],[pick('Вчера','yesterday')],[pick('Указать дату и время','manual')]];
     }else if(field==='timezone') {
@@ -113,6 +184,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       const labels=field==='daily'?['10','20','30']:field==='lapse_count'?['1','2','3']:A.CHOICES[field]||[];
       if(input&&field==='daily')text='Введи целое число от 1 до 200.';
       if(!input&&labels.length)rows=[labels.map(value=>pick(value,'v'+value)),[pick('Другое','manual')]];
+      if(mode==='history'&&field==='lapse_count')rows.push([pick('Не указано','vНе указано')]);
     }
     return send((notice?esc(notice)+'\n\n':'')+prefix+text,buttons(...rows,nav()));
   };
@@ -151,6 +223,11 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   };
   const back=async()=>{
     const {mode,field,input,date_final}=data;
+    if(mode==='history') {
+      if(data.change.kind==='remove'||data.state==='Form:historyFields')return exitHistory();
+      if(data.change.kind==='initial')return data.state==='Form:historyReview'?step({...data,field:'start',input:true}):exitHistory();
+      return historyFields(data);
+    }
     if(input)return step({...data,input:undefined,relative_date:undefined});
     if(mode==='register') {
       if(date_final)return step({...data,field:'timezone',date_final:undefined});
@@ -179,6 +256,16 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
         return send(`<b>✅ ${enabling?'Ежедневный отчёт подключён':'Время отчёта сохранено'}</b>\n\n🕒 ${user.enabled?'Каждый день в ':''}${clock}\n🌍 ${esc(zoneLabel(user.timezone))}${await scheduled()}${user.enabled?'':'\nУведомления выключены.'}`,menu());
       }
       const dateValue=timeZone=>relative_date?relativeDate(parseField('report_time',value,timeZone,now),timeZone,relative_date):value;
+      if(mode==='history') {
+        const change={...data.change};
+        if(change.kind==='initial') {
+          change.start=parseDate(dateValue(zone),zone,now);
+          return await reviewHistory({...data,change});
+        }
+        if(field==='lapse_count')change.count=value==='Не указано'?null:numeric(value,1,10000,true);
+        else change[field==='lapse_begin'?'begin':'last']=parseDate(dateValue(zone),zone,now);
+        return historyFields({...data,change});
+      }
       if(mode==='register') {
         const draft={...data.draft};
         if(field==='start') {
@@ -249,6 +336,23 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
         if(choice==='off') {user=await db.notifications(id,false,now);await remove();return notifications();}
         if(choice==='enable'||choice==='edit') {await remove();return chooseTime(choice);}
       }
+      if(data.mode==='history'&&data.state==='Form:historyFields') {
+        if(choice==='review') {
+          try {return await reviewHistory(data);}
+          catch(e) {if(!(e instanceof ValidationError))throw e;return historyFields(data,e.message);}
+        }
+        const field={first:'lapse_begin',last:'lapse_last',count:'lapse_count'}[choice];
+        if(field&&typeof field==='string'){await remove();return step({...data,field,input:field!=='lapse_count'});}
+      }
+      if(data.mode==='history'&&data.state==='Form:historyReview'&&choice==='commit') {
+        const removal=data.change.kind==='remove';
+        try {
+          if(data.timezone!==user.timezone)throw new ValidationError('Часовой пояс изменился. Открой историю заново.');
+          await db.changeHistory(id,data.change,now);
+          await clear();await remove();
+          return send(removal?'Запись удалена. Серии объединены, статистика обновлена.':'Изменения сохранены. Статистика обновлена.',buttons([['📅 История','history']],progressLink));
+        }catch(e) {if(!(e instanceof ValidationError))throw e;await clear();return send(esc(e.message),buttons([['📅 История','history']]));}
+      }
       if(data.state!=='Form:value')return;
       if(choice==='manual') {await remove();return step({...data,input:true});}
       if(choice==='today'||choice==='yesterday') {
@@ -279,6 +383,16 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     if(action==='notify:on')return user.enabled?notifications():chooseTime('enable');
     if(action==='progress')return progress();
     if(action==='progress:details')return detailedProgress();
+    if(action==='history') {if(data.state)await clear();return showHistory();}
+    if(action==='history:initial')return beginHistory('initial');
+    const historyAction=/^history:(series|lapses|episode|edit|remove):(\d{1,16})$/.exec(action);
+    if(historyAction) {
+      const [,kind,key]=historyAction;
+      if(!Number.isSafeInteger(+key))return;
+      if(kind==='series'||kind==='lapses')return historyPage(kind,+key);
+      if(kind==='episode')return episode(+key);
+      return beginHistory(kind,+key);
+    }
     if(action==='awards')return achievements();
     if(action==='report:health'||action==='health:all')return health(action==='health:all');
     if(action==='report:methodology')return send(methodologyReport(),buttons([['📖 Подробнее и источники','methodology:details']],progressLink));
@@ -305,7 +419,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       if(data.state!=='Form:confirm'||data.mode!=='lapse'||!matchesNonce())return send('Эта отметка уже обработана или отменена.');
       try {
         await db.lapse(id,data.streak_id,data.began,data.last,now,data.count??(data.began===data.last?1:null));
-        await send('Новая серия началась. Прежние результаты и награды сохранены. 🚭',menu());
+        await send('☀️ <b>Твой путь продолжается</b>\n\nОдин срыв не перечёркивает предыдущие успехи. Накопленный прогресс и заслуженные достижения сохраняются.',menu());
       } catch(e) {if(!(e instanceof ValidationError))throw e;await send(esc(e.message),menu());}
       await clear();await remove();return;
     }
@@ -347,6 +461,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     return text?accept(text):prompt('Нужен текст или кнопка с ответом.');
   }
   if(data.state==='Form:confirm'||data.state==='Form:lapse'||data.state==='Form:delete')return send('Выбери действие кнопкой или напиши /cancel.');
+  if(data.mode==='history')return send('Выбери действие кнопкой или напиши /cancel.');
   if(data.state==='Form:register')return send('Продолжить регистрацию: /start.');
   if(data.state==='Form:welcome'&&!user)return welcome();
   return send('Выбери раздел меню или начни с /start.',user?menu():undefined);

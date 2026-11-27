@@ -248,8 +248,8 @@ test('all eight screens, emitted button links and account setup work end to end'
   assert.equal(closed.end,stamp(Date.parse('2026-11-15T16:00Z')));
   assert.equal(active.start,stamp(Date.parse('2026-11-15T17:00Z')));
   assert.equal(calculate(before,now).total_seconds-calculate([closed,active],now).total_seconds,3600);
-  await send(A.MENU_LABELS[2]);assert.match(last.text,/Получено: 8 из 9/);
-  assert.match(last.text,/💎 Три месяца/);
+  await send(A.MENU_LABELS[2]);assert.match(last.text,/8 из 9 наград/);
+  assert.match(last.text,/💎 90 дней — Три месяца/);
   await send(A.MENU_LABELS[4]);assert.match(last.text,/⚙️ Настройки/);
   await click('⏰ Уведомления');await click('🔔 Подключить отчёты');await click('07:00');
   await send(A.MENU_LABELS[4]);await click('⏰ Уведомления');await click('🔕 Отключить рассылку');
@@ -321,7 +321,7 @@ test('new and legacy menu and report buttons route to real screens',async()=>{
     assert.match(chat.last().text,/<a href="https:\/\//);
   }
   await chat.cb('report:health');assert.match(chat.last().text,/Восстановление организма/);
-  await chat.cb('awards');assert.match(chat.last().text,/Все достижения/);
+  await chat.cb('awards');assert.match(chat.last().text,/Твои достижения/);
   await chat.send('/morning');await chat.click('📊 Мой прогресс');assert.match(chat.last().text,/Мой прогресс/);
 });
 
