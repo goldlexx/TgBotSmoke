@@ -48,7 +48,7 @@ async function deliverReport(db,env,candidate,now,api) {
       // Skip the IANA conversion for old milestones, even at the largest UTC offsets.
       if(crossed>yesterday-86400000&&crossed>dayDue(new Date(yesterday).toISOString().slice(0,10),u.timezone,u.report_time))milestone=reached;
     }
-    const text=morningReport(stats,day,id,milestone);
+    const text=morningReport(stats,now,u.timezone,id,streaks.at(-1)?.start,milestone);
     // Reservation + retry lease are atomic and survive a terminated invocation.
     await db.batch([
       db.stmt("INSERT INTO reports(user_id,local_date,status,created_at,attempts,milestone) VALUES (?,?,'reserved',?,?,?) ON CONFLICT(user_id,local_date) DO UPDATE SET status='reserved',created_at=excluded.created_at,attempts=excluded.attempts,milestone=COALESCE(reports.milestone,excluded.milestone)",id,day,stamp(now),attempts,milestone),

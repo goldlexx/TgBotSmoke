@@ -1,7 +1,7 @@
 import {
   A,esc,minute,stamp,local,parseDate,parseField,numeric,calculate,morningReport,reportButtons,
-  healthReport,methodologyReport,progressReport,awardsReport,cravingReport,menu,buttons,
-  settings,dateLabel,zoneLabel,cities,currencySymbol,DEFAULTS,PRIVACY,ValidationError
+  healthReport,methodologyReport,progressReport,detailedProgressReport,awardsReport,cravingReport,menu,buttons,
+  settings,dateLabel,zoneLabel,cities,currencySymbol,DEFAULTS,PRIVACY,RECOVERY_LABEL,ValidationError
 } from './core.js';
 export class DeliveryError extends Error {constructor(code,retry=0){super(`Telegram ${code}`);this.code=code;this.retry=retry;}}
 export async function telegram(env,method,body) {
@@ -69,15 +69,20 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   };
   const stats=async()=>calculate(await db.streaks(id),now);
   const earned=async()=>new Set((await db.awards(id,now)).map(a=>a.days));
-  const progress=async()=>send(progressReport(await stats(),await earned()),buttons([['🏆 Все достижения','awards']]));
+  const progressLink=[[A.MENU_LABELS[0],'progress']];
+  const methodLink=[['ℹ️ Как считаем','report:methodology']];
+  const progress=async()=>send(progressReport(await stats(),await earned()),buttons(
+    [['📊 Подробная статистика','progress:details']],methodLink,[['📝 Отметить срыв','lapse']]
+  ));
+  const detailedProgress=async()=>send(detailedProgressReport(await stats(),await earned()),buttons(methodLink,progressLink));
   const home=async()=>{
     if(!user)return welcome();
     await clear();await send('🚭 <b>НЕ КУРЮ</b>',menu());return progress();
   };
   const achievements=async()=>send(awardsReport((await stats()).current_seconds,await earned()),buttons([['📊 Мой прогресс','progress']]));
   const health=async(all=false)=>send(healthReport((await stats()).current_seconds,all),all
-    ?buttons([['🫁 Здоровье','report:health']])
-    :buttons([['✅ Все достигнутые изменения','health:all']]));
+    ?buttons([[RECOVERY_LABEL,'report:health']],progressLink)
+    :buttons([['✅ Все достигнутые изменения','health:all']],progressLink));
   const showSettings=async()=>send('<b>⚙️ Настройки</b>\n\n'+settingsSummary(user,(await db.streaks(id)).at(-1)),settings());
   const scheduled=async()=>user.enabled&&user.next_due_at!=null&&await db.active()
     ?`\n📅 Следующий отчёт: ${dateLabel(user.next_due_at,user.timezone).replace(' ', ', ')}`
@@ -273,10 +278,11 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     if(action==='notifications')return notifications();
     if(action==='notify:on')return user.enabled?notifications():chooseTime('enable');
     if(action==='progress')return progress();
+    if(action==='progress:details')return detailedProgress();
     if(action==='awards')return achievements();
     if(action==='report:health'||action==='health:all')return health(action==='health:all');
-    if(action==='report:methodology')return send(methodologyReport(),buttons([['📖 Подробнее и источники','methodology:details']]));
-    if(action==='methodology:details')return send(methodologyReport(true),buttons([['ℹ️ Как считаем','report:methodology']]));
+    if(action==='report:methodology')return send(methodologyReport(),buttons([['📖 Подробнее и источники','methodology:details']],progressLink));
+    if(action==='methodology:details')return send(methodologyReport(true),buttons(methodLink,progressLink));
     if(action==='craving:passed') {await remove();return send('Ещё одна волна позади. Серия продолжается! 🚭');}
     if(action.startsWith('edit:')) {
       const field=action.split(':')[1];
@@ -321,13 +327,14 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   if(text==='Назад'&&data.state)return back();
   if(/^\/morning(?:@\w+)?$/.test(text)) {
     if(!user) return send('Сначала /start.');
-    return send(morningReport(await stats(),local(now,user.timezone).day,id),reportButtons());
+    const streaks=await db.streaks(id);
+    return send(morningReport(calculate(streaks,now),now,user.timezone,id,streaks.at(-1)?.start),reportButtons());
   }
-  if(A.MENU_LABELS.includes(text)) {
+  if(text===RECOVERY_LABEL||A.MENU_LABELS.includes(text)) {
     if(!user)return send('Сначала /start.');
     if(data.state)await clear();
     if(text===A.MENU_LABELS[0])return progress();
-    if(text===A.MENU_LABELS[1])return health();
+    if(text===RECOVERY_LABEL||text===A.MENU_LABELS[1])return health();
     if(text===A.MENU_LABELS[2])return achievements();
     if(text===A.MENU_LABELS[3])return send(cravingReport(await stats()),buttons(
       [['✅ Отпустило','craving:passed'],['🚬 Был срыв','lapse']]

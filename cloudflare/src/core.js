@@ -154,28 +154,49 @@ function goal(seconds) {
   const next=milestones.find(d=>seconds<d*day)??from+365;
   const elapsed=seconds-from*day,total=(next-from)*day;
   const percent=Math.min(99,Math.round(elapsed*100/total)),cells=Math.min(9,Math.round(elapsed*10/total));
-  return {next,left:compactDuration(next*day-seconds,true),bar:`${'▓'.repeat(cells)}${'░'.repeat(10-cells)} ${percent}%`};
+  const left=next*day-seconds;
+  return [`🎯 Следующий рубеж — <b>${daysText(next)}</b>`,
+    `Участок: ${from?daysText(from):'старт'} → ${daysText(next)}`,
+    `${'▰'.repeat(cells)}${'▱'.repeat(10-cells)} <b>${percent}%</b>`,
+    `До рубежа — <b>${left<3600?'меньше часа':compactDuration(left,true)}</b>`].join('\n');
 }
-const series=(seconds)=>`🚭 <b>${compactDuration(seconds,true)} без сигарет</b>`;
-function totals(s,timeLabel='Свободного времени') {
-  const money=Object.entries(s.money).map(([currency,value])=>`${integer(value)} ${esc(currencySymbol(currency))}`).join(' + ');
-  return `🚬 Не выкурено: ${integer(s.cigarettes)} шт.\n💰 Сэкономлено: ${money}\n⏳ ${timeLabel}: ${compactDuration(s.free_minutes.mul(60).toNumber())}`;
+const series=seconds=>`<b>${compactDuration(seconds,true)} без сигарет</b>`;
+function totals(s,timeLabel='Свободное время') {
+  const money=Object.entries(s.money).map(([currency,value])=>`≈${integer(value)} ${esc(currencySymbol(currency))}`).join(' + ');
+  return [`🚬 Не выкурено: <b>≈${integer(s.cigarettes)} шт.</b>`,
+    ...(money?[`💰 Сэкономлено: <b>${money}</b>`]:[]),
+    `⏳ ${timeLabel}: <b>≈${compactDuration(s.free_minutes.mul(60).toNumber(),true)}</b>`].join('\n');
 }
-export function morningReport(s,localDay,id,milestone=0) {
-  const {next,left,bar}=goal(s.current_seconds);
-  const fact=`✨ <b>Факт дня</b>\n\n${dailyFact(s.current_seconds,localDay,id)}`;
-  if(milestone) return `🏆 <b>${awards[milestone]?.[2]??daysText(milestone)+' без сигарет!'}</b>\n\n`+
-    `🚭 ${daysText(milestone)} — новый рубеж!\n\n${totals(s)}\n\n${fact}\n\n🎯 Следующая цель — ${daysText(next)}.`;
-  return `${series(s.current_seconds)}\n\n🎯 До ${next} ${plural(next,'дня','дней','дней')} — ${left}\n${bar}\n\n${totals(s)}\n\n${fact}`;
+export function morningReport(s,now,zone,id,start,milestone) {
+  const localDay=local(now,zone).day;
+  const midnight=dayDue(localDay,zone,'00:00');
+  // Choose the pool at local midnight so crossing a health threshold later cannot change today's fact.
+  const startTime=Date.parse(start);
+  const ageAtMidnight=start?Math.max(0,Math.floor((midnight-startTime)/1000)):0;
+  const thought=A.THOUGHTS[(Math.floor(Date.parse(localDay)/86400000)+id)%A.THOUGHTS.length];
+  if(milestone===undefined) {
+    const latest=lastMilestone(s.current_seconds);
+    milestone=latest&&local(startTime+latest*day*1000,zone).day===localDay?latest:0;
+  }
+  const reached=milestone>0&&milestone*day<=s.current_seconds;
+  return ['☀️ <b>Доброе утро!</b>',
+    ...(reached?[`🏆 <b>${awards[milestone]?.[2]??daysText(milestone)+' без сигарет!'}</b>`]:[]),
+    series(s.current_seconds),goal(s.current_seconds),totals(s),
+    `🫁 <b>Факт о здоровье</b>\n${dailyFact(ageAtMidnight,localDay,id)}`,
+    `💡 <b>Мысль дня</b>\n${esc(thought)}`].join('\n\n');
 }
+const awardCount=earned=>`🏆 Достижения: <b>${earned.size} из ${milestones.length}</b>`;
 export function progressReport(s,earned) {
-  const {next,bar}=goal(s.current_seconds),locked=milestones.find(d=>!earned.has(d));
-  const history=milestones.filter(d=>earned.has(d)).slice(-3).map(d=>'✅ '+awards[d][1]);
-  if(locked)history.push(`🔒 ${awards[locked][1]} — следующая награда`);
+  return ['🚭 <b>Мой прогресс</b>',series(s.current_seconds),goal(s.current_seconds),totals(s)+'\n'+awardCount(earned)].join('\n\n');
+}
+export function detailedProgressReport(s,earned) {
   const life=s.life_minutes.mul(60).toDecimalPlaces(0,Decimal.ROUND_HALF_UP).toNumber();
-  const total=s.total_seconds>s.current_seconds?`\n📅 Всего без сигарет: ${compactDuration(s.total_seconds,true)}`:'';
-  return `<b>📊 Мой прогресс</b>\n\n${series(s.current_seconds)}\n\n🎯 Следующая цель — ${daysText(next)}\n${bar}\n\n${totals(s)}\n`+
-    `❤️ Статистический эквивалент жизни: ≈${compactDuration(life,true)}${total}\n\n<b>🏆 Мои достижения</b>\n\n${history.join('\n')}`;
+  const collection=milestones.filter(d=>earned.has(d)).map(d=>`${awards[d][0]} ${awards[d][1]}`);
+  return ['📊 <b>Подробная статистика</b>',
+    `Текущая серия: ${series(s.current_seconds)}\n📅 Всего без сигарет: <b>${compactDuration(s.total_seconds,true)}</b>`,
+    totals(s),
+    `❤️ Статистический эквивалент жизни: <b>≈${compactDuration(life,true)}</b>\nЭто оценка по статистической модели. Она не предсказывает продолжительность твоей жизни.`,
+    [awardCount(earned),...collection].join('\n')].join('\n\n');
 }
 export function awardsReport(seconds,earned) {
   const locked=milestones.find(d=>!earned.has(d));
@@ -184,11 +205,12 @@ export function awardsReport(seconds,earned) {
   return `<b>🏆 Все достижения</b>\n\nПолучено: ${earned.size} из ${milestones.length}\n\n${collection}\n\n${next}`;
 }
 export function cravingReport(s) {
-  return `<b>🆘 Хочу закурить</b>\n\n${series(s.current_seconds)}\n\n${totals(s,'Освобождено')}\n\n`+
+  return `<b>🆘 Хочу закурить</b>\n\n🚭 ${series(s.current_seconds)}\n\n${totals(s,'Освобождено')}\n\n`+
     '💧 Выпей воды или немного пройдись. Дай себе 5 минут.\n\n<b>Не нужно решать «навсегда». Просто не кури сейчас.</b>';
 }
 export const buttons=(...rows)=>({inline_keyboard:rows.map(row=>row.map(([text,callback_data])=>({text,callback_data})))});
-export const reportButtons=()=>buttons([['🫁 Здоровье','report:health'],['ℹ️ Как считаем','report:methodology']]);
+export const RECOVERY_LABEL='🫁 Восстановление';
+export const reportButtons=()=>buttons([[RECOVERY_LABEL,'report:health'],[A.MENU_LABELS[0],'progress']],[['ℹ️ Как считаем','report:methodology']]);
 export function methodologyReport(detailed=false) {
   const title='<b>ℹ️ Как считаем</b>';
   if(!detailed)return [
@@ -209,7 +231,7 @@ export function methodologyReport(detailed=false) {
     'Шкала показывает долю пути от предыдущего рубежа до следующего. При достижении рубежа начинается новый отрезок.'
   ].join('\n\n');
 }
-export const menu=()=>({keyboard:[[0,1],[2,3],[4]].map(row=>row.map(i=>({text:A.MENU_LABELS[i]}))),resize_keyboard:true});
+export const menu=()=>({keyboard:[[A.MENU_LABELS[0],A.MENU_LABELS[3]],[RECOVERY_LABEL],[A.MENU_LABELS[2],A.MENU_LABELS[4]]].map(row=>row.map(text=>({text}))),resize_keyboard:true,is_persistent:true});
 export const choices=(...labels)=>({
   keyboard:[...(labels.length?[labels.map(text=>({text}))]:[]),[{text:'Отмена'}]],
   resize_keyboard:true,one_time_keyboard:true

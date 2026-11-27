@@ -236,8 +236,8 @@ test('a milestone is celebrated at the first morning after reaching it and once 
   await tick(env,now,api);await tick(env,now,api);
   assert.equal(sent.length,1);
   assert.match(sent[0],/Целая неделя без сигарет!/);
-  assert.match(sent[0],/Факт дня/);
-  assert.match(sent[0],/Следующая цель — 14 дней/);
+  assert.match(sent[0],/Факт о здоровье/);
+  assert.match(sent[0],/Следующий рубеж — <b>14 дней/);
   const [old]=await db.streaks(110);
   await db.lapse(110,old.id,stamp(now),stamp(now),now,1);
   await tick(env,now+7*86400000+1000,api);
