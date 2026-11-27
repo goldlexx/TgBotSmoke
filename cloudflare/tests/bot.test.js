@@ -2,8 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {database,now,profile,message,callback} from './helpers.js';
-import {A,parseDate,local,stamp,calculate,compactDuration,morningReport,reportButtons,progressReport,detailedProgressReport,healthReport,methodologyReport,milestones,menu,RECOVERY_LABEL} from '../src/core.js';
-import {dailyFact,stages} from '../src/health.js';
+import {A,parseDate,local,stamp,calculate,compactDuration,morningReport,progressReport,detailedProgressReport,methodologyReport,milestones,menu,RECOVERY_LABEL} from '../src/core.js';
+import {dailyFact,healthCards,healthReport,stages,currentStage} from '../src/health.js';
 import {handleUpdate,DeliveryError} from '../src/bot.js';
 import worker,{tick} from '../src/worker.js';
 
@@ -21,11 +21,11 @@ test('statistics match Python, with Decimal precision and historical currencies'
 });
 
 const period=(seconds,extra={})=>({...profile,start:stamp(now-seconds*1000),...extra});
-const morning=(streaks,instant=now,milestone=null)=>morningReport(calculate(streaks,instant),instant,'Europe/Moscow',42,streaks.at(-1)?.start,milestone);
+const morning=(streaks,instant=now,milestone=null)=>morningReport(calculate(streaks,instant),instant,'Europe/Moscow',42,streaks.at(-1)?.start,milestone).text;
 
 test('compact morning example has correct local goal, whole estimates and a fact',()=>{
   const seconds=8*86400+4*3600,text=morning([period(seconds)]);
-  assert(text.startsWith('☀️ <b>Доброе утро!</b>\n\n<b>8 дней 4 часа без сигарет</b>\n\n🎯 Следующий рубеж — <b>14 дней</b>\nУчасток: 7 дней → 14 дней\n▰▰▱▱▱▱▱▱▱▱ <b>17%</b>\nДо рубежа — <b>5 дней 20 часов</b>\n\n🚬 Не выкурено: <b>≈163 шт.</b>\n💰 Сэкономлено: <b>≈2 042 ₽</b>\n⏳ Свободное время: <b>≈13 часов 36 минут</b>\n\n🫁 <b>Факт о здоровье</b>\n'+dailyFact(seconds,'2026-11-16',42)+'\n\n💡 <b>Мысль дня</b>\n'));
+  assert(text.startsWith('☀️ <b>Доброе утро!</b>\n\n<b>8 дней 4 часа без сигарет</b>\n\n🎯 Следующий рубеж — <b>14 дней</b>\nУчасток: 7 дней → 14 дней\n▰▰▱▱▱▱▱▱▱▱ <b>17%</b>\nДо рубежа — <b>5 дней 20 часов</b>\n\n🚬 Не выкурено: <b>≈163 шт.</b>\n💰 Сэкономлено: <b>≈2 042 ₽</b>\n⏳ Свободное время: <b>≈13 часов 36 минут</b>\n\n🫁 <b>Факт о здоровье</b>\n'+healthCards[dailyFact(seconds,'2026-11-16',42)][1]+'\n\n💡 <b>Мысль дня</b>\n'));
   assert(A.THOUGHTS.includes(text.split('\n').at(-1)));assert(text.length<700);
 });
 
@@ -38,7 +38,7 @@ test('facts are deterministic, age-appropriate and rotate across dates and age b
     assert.notEqual(fact,dailyFact((i+1)*86400,date(i+1),42));
     seen.add(fact);
   }
-  assert(seen.size>=18);
+  assert.deepEqual(seen,new Set(Object.keys(healthCards)));
 });
 
 test('duration omits zero parts and minutes from a day, with Russian plural forms',()=>{
@@ -85,9 +85,9 @@ test('milestone report keeps the next interval and never congratulates an unreac
   assert.match(text,/<b>30 дней без сигарет<\/b>/);
   assert.match(text,/Участок: 30 дней → 60 дней\n▱{10} <b>0%<\/b>\nДо рубежа — <b>30 дней/);
   for(const block of ['Не выкурено','Факт о здоровье','Мысль дня'])assert(text.includes(block));
-  assert.equal(morningReport(stats,now,'Europe/Moscow',42,streak.start),text);
+  assert.equal(morningReport(stats,now,'Europe/Moscow',42,streak.start).text,text);
   assert.doesNotMatch(morning([period(30*86400-1)],now,30),/Месяц без сигарет!/);
-  assert.doesNotMatch(morningReport(calculate([streak],now+86400000),now+86400000,'Europe/Moscow',42,streak.start),/Месяц без сигарет!/);
+  assert.doesNotMatch(morningReport(calculate([streak],now+86400000),now+86400000,'Europe/Moscow',42,streak.start).text,/Месяц без сигарет!/);
 });
 
 test('repeated morning reports keep the fact and thought through an age boundary in the same local day',async()=>{
@@ -121,20 +121,24 @@ test('lapse resets series and health, keeps historical totals and currencies wit
   assert.equal(s.current_seconds,3600);assert.equal(s.total_seconds,2*86400+3600);
   assert.match(text,/1 час без сигарет/);assert.match(text,/Следующий рубеж — <b>1 день/);
   assert.match(text,/≈41 шт\./);assert.match(text,/≈500 ₽ \+ ≈0 €/);
-  assert(!healthReport(s.current_seconds,true).includes('48 часов'));
+  assert.match(healthReport(s.current_seconds,'1 час'),/Текущий период · Первые минуты/);
   assert.match(morning([period(0,{currency:'KZT'})],now),/0 KZT/);
   assert(!morning([period(86400,{currency:'USD'})],now).includes('₽'));
 });
 
-test('health limits the summary to two reached and three upcoming stages, with sources',()=>{
-  for(const sec of [0,1200,259200,315360001]) {
-    const text=healthReport(sec),all=healthReport(sec,true);
-    const reached=stages.filter(([at])=>at<=sec),next=stages.filter(([at])=>at>sec).slice(0,3);
-    for(const [,label,fact,url] of reached)assert(all.includes(`${label} — ${fact} <a href="${url}">Источник</a>`));
-    for(const [,,fact,url] of next)assert(text.includes(fact)&&text.includes(url));
-    assert.equal(text.match(/^✅ /gm)?.length??0,Math.min(2,reached.length));
-    assert.equal(text.match(/^✨ /gm)?.length??0,next.length);
-    assert.match(text,/Сроки индивидуальны/);assert(all.length<4096);
+test('recovery uses substantive periods, specific source records and exact boundaries',()=>{
+  for(const [index,[start,label,,keys]] of stages.entries()) {
+    assert.equal(currentStage(start),index);
+    if(index)assert.equal(currentStage(start-1),index-1);
+    for(const key of keys)assert.match(healthCards[key][2],/^https:\/\//);
+    const text=healthReport(start,compactDuration(start,true));
+    assert(text.includes(label));assert(text.includes(healthCards[keys[0]][1]));
+    assert.equal(text.includes('Ближайший ориентир'),index<stages.length-1);
+    assert.match(text,/Темп восстановления индивидуален/);assert(text.length<4096);
+  }
+  for(const sec of [900,10800,...[1,3,7,14,23,30,90,365,730,6000].map(days=>days*86400)]) {
+    const text=healthReport(sec,compactDuration(sec,true));
+    assert.match(text,/Текущий период/);assert.doesNotMatch(text,/Все ориентиры пройдены|<a href=/);
   }
   const method=methodologyReport(true);assert(method.length<4096);
   for(const source of [A.ADDICTION,A.MODEL_NOTE])assert(method.includes(source));
@@ -148,13 +152,13 @@ test('morning preview and real inline callbacks work during a form without alter
   const before=JSON.stringify({user:await db.user(42),streaks:await db.streaks(42),state:await db.state(42,123456)}),calls=[];
   const api=async(_,method,body)=>calls.push({method,body});
   await handleUpdate({message:{chat:{id:42,type:'private'},from:{id:42},text:'/morning'}},db,env,now,api);
-  assert.deepEqual(calls[0].body.reply_markup,reportButtons());
-  for(const button of reportButtons().inline_keyboard.flat()) {
+  const markup=calls[0].body.reply_markup;
+  for(const button of markup.inline_keyboard.flat()) {
     calls.length=0;
     await handleUpdate({callback_query:{id:'cb',from:{id:42},data:button.callback_data,message:{message_id:1,chat:{id:42,type:'private'}}}},db,env,now,api);
     assert.equal(calls[0].method,'answerCallbackQuery');assert.equal(calls[1].method,'sendMessage');
-    const expected={'report:health':'Следующие изменения','progress':'Мой прогресс','report:methodology':'по статистической модели'};
-    assert(calls[1].body.text.includes(expected[button.callback_data]));
+    const expected={'report:health':'Ближайший ориентир','progress':'Мой прогресс','report:methodology':'по статистической модели'};
+    assert(calls[1].body.text.includes(expected[button.callback_data]||healthCards[button.callback_data.split(':').at(-1)][1]));
   }
   assert.equal(JSON.stringify({user:await db.user(42),streaks:await db.streaks(42),state:await db.state(42,123456)}),before);
 });
@@ -166,9 +170,9 @@ test('scheduled morning uses local time and inline buttons while detailed progre
   await db.run("UPDATE cloud_control SET value='1' WHERE key='active'");
   const calls=[],api=async(_,method,body)=>calls.push({method,body});
   await tick(env,now,api);assert.equal(calls.length,1);assert.equal(calls[0].body.chat_id,1);
-  assert.deepEqual(calls[0].body.reply_markup,reportButtons());
   const streaks=await db.streaks(1);
-  assert.equal(calls[0].body.text,morningReport(calculate(streaks,now),now,'Asia/Tokyo',1,streaks[0].start,null));
+  const report=morningReport(calculate(streaks,now),now,'Asia/Tokyo',1,streaks[0].start,null);
+  assert.deepEqual(calls[0].body.reply_markup,report.reply_markup);assert.equal(calls[0].body.text,report.text);
   assert.equal((await db.one('SELECT * FROM reports WHERE user_id=1 AND local_date=?','2026-11-16')).status,'sent');
   await handleUpdate({message:{chat:{id:1,type:'private'},from:{id:1},text:A.MENU_LABELS[0]}},db,env,now,api);
   assert.doesNotMatch(calls.at(-1).body.text,/Статистический эквивалент жизни/);
@@ -230,11 +234,11 @@ test('all eight screens, emitted button links and account setup work end to end'
   await click('ℹ️ Как считаем');assert(!last.text.includes('86 400'));
   await click('📖 Подробнее и источники');assert.match(last.text,/86 400/);
   await send('/morning');await click(RECOVERY_LABEL);assert.match(last.text,/Восстановление организма/);
-  await click('✅ Все достигнутые изменения');assert.match(last.text,/Все достигнутые изменения/);
-  await click(RECOVERY_LABEL);
-  await send(A.MENU_LABELS[3]);assert.match(last.text,/Дай себе 5 минут/);
-  await click('✅ Отпустило');assert.match(last.text,/Серия продолжается/);
-  await send(A.MENU_LABELS[3]);await click('🚬 Был срыв');
+  await click('📅 Все этапы восстановления');assert.match(last.text,/Все этапы восстановления/);
+  await click('Назад');
+  await send(A.MENU_LABELS[3]);assert.match(last.text,/Что сейчас происходит/);
+  await click('✅ Отпустило');assert.match(last.text,/Продолжай в своём темпе/);
+  await click('Хочу закурить');await click('📝 Отметить срыв');
   await click('Указать другое время или количество');
   await send('15.11.2026 19:00');await click('3');await send('15.11.2026 18:00');
   assert.match(last.text,/не раньше первой/);
@@ -251,23 +255,23 @@ test('all eight screens, emitted button links and account setup work end to end'
   await send(A.MENU_LABELS[2]);assert.match(last.text,/8 из 9 наград/);
   assert.match(last.text,/💎 90 дней — Три месяца/);
   await send(A.MENU_LABELS[4]);assert.match(last.text,/⚙️ Настройки/);
-  await click('⏰ Уведомления');await click('🔔 Подключить отчёты');await click('07:00');
-  await send(A.MENU_LABELS[4]);await click('⏰ Уведомления');await click('🔕 Отключить рассылку');
+  await click('🔔 Уведомления');await click('🔔 Подключить отчёты');await click('07:00');
+  await send(A.MENU_LABELS[4]);await click('🔔 Уведомления');await click('🔕 Отключить рассылку');
   assert.equal((await db.user(42)).next_due_at,null);
   await click('🔔 Подключить отчёты');await click('08:00');assert((await db.user(42)).next_due_at>now);
-  await send(A.MENU_LABELS[4]);await click('⏰ Уведомления');await click('🕒 Изменить время');await send('06:00');
-  await send(A.MENU_LABELS[4]);await click('💰 Стоимость');await send('6 EUR');
-  await send(A.MENU_LABELS[4]);await click('📦 Размер пачки');await send('25');
-  await send(A.MENU_LABELS[4]);await click('🚭 Дата отказа');await send('15.11.2026 20:30');
-  await send(A.MENU_LABELS[4]);await click('🚬 Привычка');await click('20');
-  await send(A.MENU_LABELS[4]);await click('⏳ Минут на сигарету');await click('7');
+  await send(A.MENU_LABELS[4]);await click('🔔 Уведомления');await click('🕒 Изменить время');await send('06:00');
+  await send(A.MENU_LABELS[4]);await click('💰 Привычка и экономия');await click('💰 Стоимость и валюта');await send('6 EUR');
+  await click('📦 Размер пачки');await send('25');
+  await cb('edit:start');await send('15.11.2026 20:30');
+  await send(A.MENU_LABELS[4]);await click('💰 Привычка и экономия');await click('🚬 Привычка');await click('20');
+  await click('⏳ Минут на сигарету');await click('7');
   await send(A.MENU_LABELS[4]);await click('🌍 Часовой пояс');await send('Europe/Berlin');
   const edited=await db.user(42);
   assert.deepEqual([edited.price,edited.currency,edited.pack,edited.daily,edited.minutes,edited.timezone,edited.report_time],['6','EUR',25,20,'7','Europe/Berlin','06:00']);
   await send('/start');assert.deepEqual(await db.user(42),edited);
-  await send(A.MENU_LABELS[4]);await click('🗑 Удалить мои данные');await click('Отмена');
+  await send(A.MENU_LABELS[4]);await click('ℹ️ О боте и мои данные');await click('🗑 Удалить мои данные');await click('Отмена');
   assert.deepEqual(await db.user(42),edited);
-  await send(A.MENU_LABELS[4]);await click('🚬 Отметить срыв');await click('Отмена');
+  await send(A.MENU_LABELS[4]);await click('📅 Дата и история');await click('📝 Отметить срыв');await click('Отмена');
   assert.equal((await db.streaks(42)).length,2);
 });
 
@@ -318,11 +322,76 @@ test('new and legacy menu and report buttons route to real screens',async()=>{
   assert.equal((await db.state(590,123456)).state,'Form:lapse');await chat.click('Отмена');
   for(const label of [RECOVERY_LABEL,A.MENU_LABELS[1]]) {
     await chat.send(label);assert.match(chat.last().text,/Восстановление организма/);
-    assert.match(chat.last().text,/<a href="https:\/\//);
+    await chat.click('🔬 Подробнее и источники');
+    const source=chat.last().reply_markup.inline_keyboard.flat().find(b=>b.callback_data.startsWith('health:source:'));
+    await chat.cb(source.callback_data);assert.match(chat.last().text,/<a href="https:\/\//);
   }
   await chat.cb('report:health');assert.match(chat.last().text,/Восстановление организма/);
   await chat.cb('awards');assert.match(chat.last().text,/Твои достижения/);
   await chat.send('/morning');await chat.click('📊 Мой прогресс');assert.match(chat.last().text,/Мой прогресс/);
+});
+
+test('recovery opens future stages and returns from sources to the exact stage and page',async()=>{
+  const {db,env}=database();await db.register(591,591,{...profile,start:period(23*86400).start},now);
+  const chat=conversation(db,env,591);
+  await chat.send(RECOVERY_LABEL);assert.match(chat.last().text,/23 дня без сигарет[\s\S]+4-я неделя[\s\S]+Кровообращение/);
+  await chat.click('📅 Все этапы восстановления');assert.match(chat.last().text,/Пройдено[\s\S]+Страница 1 из 3/);
+  await chat.click('Далее →');assert.match(chat.last().text,/📍 Сейчас[\s\S]+⏳ Впереди[\s\S]+Страница 2 из 3/);
+  await chat.click('Далее →');await chat.click('10 лет и дальше');
+  await chat.click('Источник · 🫁 Риск рака лёгкого');assert(chat.last().text.includes(healthCards.lung[2]));
+  await chat.click('Назад');assert.match(chat.last().text,/10 лет и дальше/);
+  await chat.click('Назад');assert.match(chat.last().text,/Страница 3 из 3/);
+  await chat.click('Назад');assert.match(chat.last().text,/Восстановление организма/);
+  await chat.send('/morning');const report=chat.last();
+  const fact=report.reply_markup.inline_keyboard.flat().find(button=>button.callback_data.startsWith('health:fact:'));
+  const card=healthCards[fact.callback_data.split(':').at(-1)];
+  assert(report.text.includes(card[1]));await chat.cb(fact.callback_data);assert(chat.last().text.includes(card[2]));
+  await chat.click('Назад');assert.deepEqual(chat.last(),report);
+});
+
+test('craving categories cycle through 40 unique cards without writes or automatic replies',async()=>{
+  const {db,env,metrics}=database();await db.register(592,592,profile,now);
+  const chat=conversation(db,env,592),seen=new Set();metrics.sql.length=0;
+  await chat.send(A.MENU_LABELS[3]);
+  for(const label of ['☕ Привычный ритуал','😟 Стресс','👥 В компании','🔄 Скука или привычка']) {
+    await chat.click(label);const start=chat.last().text;
+    for(let i=0;i<10;i++) {
+      assert(chat.last().text.includes(label));assert(!seen.has(chat.last().text));
+      seen.add(chat.last().text);await chat.click('💡 Другой совет');
+    }
+    assert.equal(chat.last().text,start);
+    await chat.click('Назад');assert.match(chat.last().text,/Что сейчас происходит/);
+  }
+  const count=chat.replies.length;
+  await chat.click('✅ Отпустило');assert.equal(chat.replies.length,count+1);
+  chat.button('📊 Мой прогресс');await chat.click('Хочу закурить');
+  assert.equal(seen.size,40);assert(!metrics.sql.some(query=>/^(UPDATE|INSERT|DELETE)/i.test(query)));
+});
+
+test('settings groups link to history, cancel edits and keep manual reports and privacy separate',async()=>{
+  const {db,env}=database();const id=593;
+  await db.register(id,id,{...profile,enabled:0},now);
+  const chat=conversation(db,env,id),before=await db.user(id);
+  await chat.send(A.MENU_LABELS[4]);
+  assert.match(chat.last().text,/Стоимость пачки[\s\S]+Продолжительность перекура[\s\S]+Подписка: <b>выключена/);
+  await chat.click('📅 Дата и история');assert.match(chat.last().text,/История прогресса/);await chat.click('Назад');
+  await chat.click('💰 Привычка и экономия');await chat.click('💰 Стоимость и валюта');await chat.click('Отмена');
+  assert.match(chat.last().text,/Привычка и экономия[\s\S]+Ввод отменён/);assert.deepEqual(await db.user(id),before);
+  await chat.click('Назад');await chat.click('🔔 Уведомления');
+  assert.match(chat.last().text,/Предпочтительное время: 08:00/);assert.doesNotMatch(chat.last().text,/Следующий отчёт/);
+  await chat.click('Открыть отчёт');assert.match(chat.last().text,/Доброе утро/);
+  await chat.click('🔬 Подробнее и источники');assert.match(chat.last().text,/Открыть источник/);
+  await chat.click('Назад');await chat.click('Назад');
+  await chat.click('🕒 Изменить время');await chat.click('07:00');await chat.click('🔔 Уведомления');
+  assert.match(chat.last().text,/выключена[\s\S]+Предпочтительное время: 07:00/);
+  assert.deepEqual({...await db.user(id)},{...before,report_time:'07:00'});
+  await chat.click('Назад');await chat.click('ℹ️ О боте и мои данные');
+  await chat.click('🔐 Конфиденциальность');assert.match(chat.last().text,/ID чата[\s\S]+история восстановления D1/i);
+  await chat.click('Назад');await chat.click('ℹ️ Как считаем');assert(chat.last().text.includes(A.ADDICTION));
+  await chat.click('Назад');await chat.click('🔬 Источники');assert.match(chat.last().text,/who\.int[\s\S]+www\.cdc\.gov/);
+  await chat.click('Назад');await chat.click('🗑 Удалить мои данные');const stale=chat.button('Да, удалить мои данные');
+  await chat.click('Отмена');assert.match(chat.last().text,/О боте и мои данные/);
+  await chat.cb(stale);assert.match(chat.last().text,/устарело/);assert(await db.user(id));
 });
 
 test('onboarding resumes existing drafts; every step can go back and cancel',async()=>{

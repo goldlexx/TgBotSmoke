@@ -1,5 +1,5 @@
 import {Database} from './db.js';
-import {local,stamp,nextDue,dayDue,calculate,lastMilestone,morningReport,reportButtons} from './core.js';
+import {local,stamp,nextDue,dayDue,calculate,lastMilestone,morningReport} from './core.js';
 import {handleUpdate,telegram,DeliveryError} from './bot.js';
 
 // Production: dispatcher <=6 D1 calls +8 public HTTP loopbacks =14 subrequests.
@@ -48,14 +48,14 @@ async function deliverReport(db,env,candidate,now,api) {
       // Skip the IANA conversion for old milestones, even at the largest UTC offsets.
       if(crossed>yesterday-86400000&&crossed>dayDue(new Date(yesterday).toISOString().slice(0,10),u.timezone,u.report_time))milestone=reached;
     }
-    const text=morningReport(stats,now,u.timezone,id,streaks.at(-1)?.start,milestone);
+    const report=morningReport(stats,now,u.timezone,id,streaks.at(-1)?.start,milestone);
     // Reservation + retry lease are atomic and survive a terminated invocation.
     await db.batch([
       db.stmt("INSERT INTO reports(user_id,local_date,status,created_at,attempts,milestone) VALUES (?,?,'reserved',?,?,?) ON CONFLICT(user_id,local_date) DO UPDATE SET status='reserved',created_at=excluded.created_at,attempts=excluded.attempts,milestone=COALESCE(reports.milestone,excluded.milestone)",id,day,stamp(now),attempts,milestone),
       db.stmt('UPDATE users SET next_due_at=? WHERE user_id=?',now+LEASE,id)
     ]);
     let error;
-    try {await api(env,'sendMessage',{chat_id:u.chat_id,text,parse_mode:'HTML',reply_markup:reportButtons(),link_preview_options:{is_disabled:true}});}catch(e){error=e;}
+    try {await api(env,'sendMessage',{chat_id:u.chat_id,...report,parse_mode:'HTML',link_preview_options:{is_disabled:true}});}catch(e){error=e;}
     const {status,retry}=deliveryResult(error,attempts,now);
     await db.batch([
       // Telegram explicitly rejected a 429; ambiguous timeouts must keep the reservation.

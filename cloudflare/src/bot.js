@@ -1,8 +1,10 @@
 import {
-  A,esc,minute,stamp,local,parseDate,parseField,numeric,calculate,morningReport,reportButtons,
-  healthReport,methodologyReport,progressReport,detailedProgressReport,awardsReport,cravingReport,menu,buttons,
-  settings,dateLabel,zoneLabel,cities,currencySymbol,DEFAULTS,PRIVACY,RECOVERY_LABEL,ValidationError
+  A,esc,minute,stamp,local,parseDate,parseField,numeric,calculate,morningReport,compactDuration,
+  methodologyReport,progressReport,detailedProgressReport,awardsReport,menu,buttons,
+  dateLabel,zoneLabel,cities,currencySymbol,DEFAULTS,PRIVACY,RECOVERY_LABEL,ValidationError
 } from './core.js';
+import {healthReport,healthCards,stages,currentStage,healthNote,stageCards,generalSources} from './health.js';
+import {cravingCategories} from './craving.js';
 import {historyReport,seriesReport,episodeReport,episodeFields,historyTarget,historySnapshot,validateHistoryChange} from './history.js';
 export class DeliveryError extends Error {constructor(code,retry=0){super(`Telegram ${code}`);this.code=code;this.retry=retry;}}
 export async function telegram(env,method,body) {
@@ -44,11 +46,15 @@ function parseZone(text,now) {
   const candidates=named||text.includes('/')?[]:Intl.supportedValuesOf('timeZone').filter(zone=>zone.split('/').at(-1).toLowerCase()===query);
   return parseField('timezone',named||(candidates.length===1?candidates[0]:text),DEFAULTS.timezone,now);
 }
-const settingsSummary=(user,active)=>[
-  `🚭 Последняя сигарета: ${dateLabel(active.start,user.timezone)}`,
-  `🚬 ${user.daily} сигарет/день · ${esc(user.price)} ${esc(currencySymbol(user.currency))}/пачка (${user.pack} шт.)`,
-  `⏰ Отчёт: ${user.enabled?user.report_time:'выключен'} · ${esc(zoneLabel(user.timezone))}`
+const habitSummary=user=>[
+  `🚬 Прежняя привычка: <b>${user.daily} шт. в день</b>`,
+  `💰 Стоимость пачки: <b>${esc(user.price)} ${esc(currencySymbol(user.currency))}</b>`,
+  `📦 Сигарет в пачке: <b>${user.pack}</b>`,
+  `⏳ Продолжительность перекура: <b>${esc(user.minutes)} мин.</b>`
 ].join('\n');
+const habitFields=['daily','cost','pack','minutes'];
+const notificationSummary=user=>`🔔 Подписка: <b>${user.enabled?'включена':'выключена'}</b>\n`+
+  `🕒 ${user.enabled?'Время отчёта':'Предпочтительное время'}: ${user.report_time}\n🌍 Часовой пояс: ${esc(zoneLabel(user.timezone))}`;
 
 export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   const cb=update.callback_query,m=cb?.message||update.message;
@@ -68,6 +74,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   const cancel=async()=>{
     if(!user)return welcome();
     if(data.mode==='history')return exitHistory();
+    if(data.mode==='edit'||(data.mode==='notify'&&!data.offer)||data.fromAbout)return leaveSettingsForm('Ввод отменён.');
     await clear();return send('Ввод отменён.',menu());
   };
   const stats=async()=>calculate(await db.streaks(id),now);
@@ -83,13 +90,25 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     await clear();await send('🚭 <b>НЕ КУРЮ</b>',menu());return progress();
   };
   const achievements=async()=>send(awardsReport((await stats()).current_seconds,await earned()),buttons([['📊 Мой прогресс','progress']]));
-  const showHistory=async()=>{
+  const lapseLink=[['📝 Отметить срыв','lapse']];
+  const reliefLink=['✅ Отпустило','craving:passed'];
+  const craving=()=>send('🆘 <b>Хочется закурить?</b>\n\nЖелание закурить может возникнуть автоматически, особенно в привычной обстановке.\n\nЧто сейчас происходит?',buttons(
+    ...Object.entries(cravingCategories).map(([key,[label]])=>[[label,`craving:tip:${key}:0`]]),
+    [reliefLink],lapseLink,[['Назад','progress']]));
+  const cravingTip=async(key,index)=>{
+    if(!Object.hasOwn(cravingCategories,key))return craving();
+    const [label,tips]=cravingCategories[key];
+    if(index>=tips.length)return craving();
+    return send(`<b>${label}</b>\n\n<b>Попробуй сейчас</b>\n${tips[index]}\n\n🚭 <b>${compactDuration((await stats()).current_seconds,true)} без сигарет</b>`,buttons(
+      [reliefLink,['💡 Другой совет',`craving:tip:${key}:${(index+1)%tips.length}`]],lapseLink,[['Назад','craving']]));
+  };
+  const showHistory=async(returnTo='progress')=>{
     const rows=await db.streaks(id);
     if(!rows.length)return send('История пока недоступна.',buttons(progressLink));
     return send(historyReport(rows,user.timezone,now),buttons(
       [['Исправить начальную дату','history:initial']],
       ...(rows.length>1?[[['Срывы','history:lapses:0']]]:[]),
-      [['📝 Отметить срыв','lapse']], [['Серии без сигарет','history:series:0']], [['Назад','progress']]));
+      [['📝 Отметить срыв','lapse']], [['Серии без сигарет','history:series:0']], [['Назад',returnTo]]));
   };
   const historyPage=async(kind,requested)=>{
     const rows=await db.streaks(id),series=kind==='series';
@@ -151,18 +170,77 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       return await reviewHistory(next);
     }catch(e) {if(!(e instanceof ValidationError))throw e;return kind==='initial'?send(esc(e.message),buttons([['📅 История','history']])):episode(key,e.message);}
   };
-  const health=async(all=false)=>send(healthReport((await stats()).current_seconds,all),all
-    ?buttons([[RECOVERY_LABEL,'report:health']],progressLink)
-    :buttons([['✅ Все достигнутые изменения','health:all']],progressLink));
-  const showSettings=async()=>send('<b>⚙️ Настройки</b>\n\n'+settingsSummary(user,(await db.streaks(id)).at(-1)),settings());
+  const morning=async(fromNotifications=false)=>{
+    const streaks=await db.streaks(id);
+    const report=morningReport(calculate(streaks,now),now,user.timezone,id,streaks.at(-1)?.start);
+    if(fromNotifications) {
+      const keyboard=report.reply_markup.inline_keyboard;
+      keyboard.flat().find(button=>button.callback_data.startsWith('health:fact:')).callback_data+=':n';
+      keyboard.push([{text:'Назад',callback_data:'notifications'}]);
+    }
+    return send(report.text,report.reply_markup);
+  };
+  const healthSize=3;
+  const stagesLink=[['📅 Все этапы восстановления','health:page:0']];
+  const healthBack=[['Назад','report:health']];
+  const health=async()=>{
+    const seconds=(await stats()).current_seconds;
+    return send(healthReport(seconds,compactDuration(seconds,true)),buttons(stagesLink,
+      [['🔬 Подробнее и источники',`health:stage:${currentStage(seconds)}`]],[['Главное меню','home']]));
+  };
+  const healthPage=async page=>{
+    const last=Math.ceil(stages.length/healthSize)-1;
+    if(page>last)return health();
+    const index=currentStage((await stats()).current_seconds),offset=page*healthSize;
+    const items=stages.slice(offset,offset+healthSize);
+    const summaries=items.map(([,label,text],i)=>`${offset+i<index?'✅ Пройдено':offset+i===index?'📍 Сейчас':'⏳ Впереди'} · <b>${label}</b>\n${text}`);
+    return send(['📅 <b>Все этапы восстановления</b>',...summaries,`Страница ${page+1} из ${last+1}`,healthNote].join('\n\n'),buttons(
+      ...items.map(([,label],i)=>[[label,`health:stage:${offset+i}`]]),
+      [...(page?[['← Назад',`health:page:${page-1}`]]:[]),...(page<last?[['Далее →',`health:page:${page+1}`]]:[])],healthBack));
+  };
+  const healthStage=index=>{
+    const stage=stages[index];
+    if(!stage)return health();
+    return send([`📅 <b>${stage[1]}</b>`,...stageCards(index),healthNote].join('\n\n'),buttons(
+      ...stage[3].map(key=>[[`Источник · ${healthCards[key][0]}`,`health:source:${index}:${key}`]]),
+      [['Назад',`health:page:${Math.floor(index/healthSize)}`]]));
+  };
+  const healthSource=(key,index,fromNotifications=false)=>{
+    if(!Object.hasOwn(healthCards,key)||(index!==undefined&&!stages[index]?.[3].includes(key)))return health();
+    const [label,text,url,note]=healthCards[key];
+    return send([`🔬 <b>${label}</b>`,text,note,`<a href="${url}">Открыть источник</a>`].filter(Boolean).join('\n\n'),
+      buttons([['Назад',index===undefined?(fromNotifications?'morning:notifications':'morning'):`health:stage:${index}`]]));
+  };
+  const settingsBack=[['Назад','settings']];
+  const aboutBack=[['Назад','settings:about']];
+  const homeLink=[['Главное меню','home']];
+  const showSettings=async notice=>send([
+    '<b>⚙️ Настройки</b>',notice,`📅 Последняя сигарета: ${dateLabel((await db.streaks(id)).at(-1).start,user.timezone)}`,
+    habitSummary(user),notificationSummary(user)
+  ].filter(Boolean).join('\n\n'),buttons([['📅 Дата и история','settings:history']],[['💰 Привычка и экономия','settings:habit']],
+    [['🔔 Уведомления','notifications'],['🌍 Часовой пояс','edit:timezone']],[['ℹ️ О боте и мои данные','settings:about']],homeLink));
+  const showHabit=notice=>send(['💰 <b>Привычка и экономия</b>',notice,habitSummary(user)].filter(Boolean).join('\n\n'),buttons(
+    [['🚬 Привычка','edit:daily']],[['💰 Стоимость и валюта','edit:cost']],[['📦 Размер пачки','edit:pack']],
+    [['⏳ Минут на сигарету','edit:minutes']],settingsBack));
+  const showAbout=()=>send('ℹ️ <b>О боте и мои данные</b>\n\n«НЕ КУРЮ» помогает следить за прогрессом без сигарет и замечать положительные изменения. Бесплатно, без рекламы и осуждения.',buttons(
+    [['🔐 Конфиденциальность','settings:privacy']],[['ℹ️ Как считаем','settings:method']],[['🔬 Источники','settings:sources']],
+    [['🗑 Удалить мои данные','delete']],settingsBack));
+  const leaveSettingsForm=async notice=>{
+    const {mode,field,fromAbout}=data;
+    await clear();
+    if(mode==='notify')return notifications(notice);
+    if(fromAbout)return showAbout();
+    return habitFields.includes(field)?showHabit(notice):showSettings(notice);
+  };
   const scheduled=async()=>user.enabled&&user.next_due_at!=null&&await db.active()
     ?`\n📅 Следующий отчёт: ${dateLabel(user.next_due_at,user.timezone).replace(' ', ', ')}`
     :user.enabled?'\nБлижайшее время отправки пока недоступно.':'';
-  const notifications=async()=>{
+  const notifications=async notice=>{
     await save({state:'Form:notifications',nonce:nonce()});
-    return send(`<b>⏰ Уведомления</b>\n\nЕжедневный отчёт ${user.enabled?'включён':'выключен'}.\nВремя: ${user.report_time} · ${esc(zoneLabel(user.timezone))}${await scheduled()}`,
+    return send(['🔔 <b>Уведомления</b>',notice,notificationSummary(user)+await scheduled()].filter(Boolean).join('\n\n'),
       buttons([pick('🕒 Изменить время','edit')],
-        [user.enabled?pick('🔕 Отключить рассылку','off'):pick('🔔 Подключить отчёты','enable')],[['⚙️ Настройки','settings']]));
+        [user.enabled?pick('🔕 Отключить рассылку','off'):pick('🔔 Подключить отчёты','enable')],
+        [['Открыть отчёт','morning:notifications']],settingsBack));
   };
   const prompt=(notice='')=>{
     const {field,input,relative_date,mode,date_final,draft}=data;
@@ -200,8 +278,8 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     await progress();
     return chooseTime('enable',true);
   };
-  const deletePrompt=async()=>{
-    await save({state:'Form:delete',nonce:nonce()});
+  const deletePrompt=async(fromAbout=false)=>{
+    await save({state:'Form:delete',nonce:nonce(),fromAbout});
     return send('Удалить все твои данные? Будут удалены настройки, серии, срывы, достижения и очередь отправок. Отчёты прекратятся, вернуть историю через бота нельзя. Сообщения в Telegram останутся. Резервные копии удаляются владельцем отдельно, история восстановления D1 хранится до 7 дней. Для защиты от старых событий останется необратимая метка ID с датой удаления.',
       buttons([['Да, удалить мои данные',`delete:confirm:${data.nonce}`]],nav()));
   };
@@ -218,8 +296,10 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       [['Указать другое время или количество',`lapse:other:${data.nonce}`]],nav()));
   };
   const later=async()=>{
+    const offer=data.offer;
     await clear();
-    return send('Уведомления пока выключены. Подключить их можно в настройках, а открыть отчёт вручную — командой /morning.',menu());
+    const notice='Уведомления пока выключены. Отчёт можно открыть вручную командой /morning.';
+    return offer?send(notice,menu()):notifications(notice);
   };
   const back=async()=>{
     const {mode,field,input,date_final}=data;
@@ -234,13 +314,14 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       const previous=registerSteps[registerSteps.indexOf(field)-1];
       return previous?step({...data,field:previous}):welcome();
     }
-    if(mode==='notify')return data.offer?later():notifications();
+    if(mode==='notify')return data.offer?later():leaveSettingsForm();
     if(mode==='lapse') {
       const previous={lapse_count:'lapse_begin',lapse_last:'lapse_count'}[field];
       if(data.state==='Form:confirm'&&field)return step({...data,input:undefined,relative_date:undefined});
       return previous?step({...data,field:previous}):lapsePrompt();
     }
     if(!user)return welcome();
+    if(mode==='edit'||data.fromAbout)return leaveSettingsForm();
     await clear();return showSettings();
   };
   const accept=async text=>{
@@ -253,7 +334,8 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
         const enabling=data.intent==='enable';
         user=await db.notifications(id,enabling||Boolean(user.enabled),now,clock);
         await clear();
-        return send(`<b>✅ ${enabling?'Ежедневный отчёт подключён':'Время отчёта сохранено'}</b>\n\n🕒 ${user.enabled?'Каждый день в ':''}${clock}\n🌍 ${esc(zoneLabel(user.timezone))}${await scheduled()}${user.enabled?'':'\nУведомления выключены.'}`,menu());
+        return send(`<b>✅ ${enabling?'Ежедневный отчёт подключён':'Время отчёта сохранено'}</b>\n\n🕒 ${user.enabled?'Каждый день в ':''}${clock}\n🌍 ${esc(zoneLabel(user.timezone))}${await scheduled()}${user.enabled?'':'\nУведомления выключены.'}`,
+          buttons([['🔔 Уведомления','notifications']],progressLink));
       }
       const dateValue=timeZone=>relative_date?relativeDate(parseField('report_time',value,timeZone,now),timeZone,relative_date):value;
       if(mode==='history') {
@@ -299,7 +381,11 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       if(mode==='edit') {
         const parsed=field==='timezone'?parseZone(value,now):parseField(field,dateValue(zone),zone,now);
         await db.change(id,field,parsed,now);
-        await clear();return send('Сохранено.',menu());
+        if(field!=='start') {
+          user={...user,...(field==='cost'?parsed:{[field]:parsed})};
+          return leaveSettingsForm('✅ Сохранено.');
+        }
+        await clear();return send('Сохранено.',buttons(settingsBack));
       }
       if(mode==='lapse') {
         if(field==='lapse_begin') {
@@ -378,10 +464,18 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     }
     if(!user) return send('Сначала /start.');
     if(action==='settings') {await clear();return showSettings();}
-    if(action==='delete')return deletePrompt();
+    if(action==='delete')return deletePrompt(true);
+    if(action==='settings:history') {if(data.state)await clear();return showHistory('settings');}
+    if(action==='settings:habit') {if(data.state)await clear();return showHabit();}
+    if(action==='settings:about') {if(data.state)await clear();return showAbout();}
+    if(action==='settings:privacy')return send(PRIVACY,buttons(aboutBack));
+    if(action==='settings:method')return send(methodologyReport(true),buttons(aboutBack));
+    if(action==='settings:sources')return send('🔬 <b>Источники о восстановлении</b>\n\n'+generalSources,buttons(stagesLink,aboutBack));
     if(action==='notifications')return notifications();
     if(action==='notify:on')return user.enabled?notifications():chooseTime('enable');
     if(action==='progress')return progress();
+    if(action==='home')return home();
+    if(action==='morning'||action==='morning:notifications')return morning(action==='morning:notifications');
     if(action==='progress:details')return detailedProgress();
     if(action==='history') {if(data.state)await clear();return showHistory();}
     if(action==='history:initial')return beginHistory('initial');
@@ -394,10 +488,21 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
       return beginHistory(kind,+key);
     }
     if(action==='awards')return achievements();
-    if(action==='report:health'||action==='health:all')return health(action==='health:all');
+    if(action==='report:health')return health();
+    if(action==='health:all')return healthPage(0);
+    const healthAction=/^health:(page|stage|source):(\d)(?::([a-z]+))?$/.exec(action);
+    if(healthAction) {
+      const [,kind,index,key]=healthAction;
+      return kind==='page'?healthPage(+index):kind==='stage'?healthStage(+index):healthSource(key,+index);
+    }
+    const fact=/^health:fact:([a-z]+)(:n)?$/.exec(action);
+    if(fact)return healthSource(fact[1],undefined,Boolean(fact[2]));
     if(action==='report:methodology')return send(methodologyReport(),buttons([['📖 Подробнее и источники','methodology:details']],progressLink));
     if(action==='methodology:details')return send(methodologyReport(true),buttons(methodLink,progressLink));
-    if(action==='craving:passed') {await remove();return send('Ещё одна волна позади. Серия продолжается! 🚭');}
+    if(action==='craving')return craving();
+    if(action==='craving:passed') {await remove();return send('Ещё одна волна позади. Продолжай в своём темпе. 🚭',buttons(progressLink,[['Хочу закурить','craving']]));}
+    const tip=/^craving:tip:([a-z]+):(\d{1,2})$/.exec(action);
+    if(tip)return cravingTip(tip[1],+tip[2]);
     if(action.startsWith('edit:')) {
       const field=action.split(':')[1];
       if(!A.FIELDS.includes(field))return;
@@ -441,8 +546,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   if(text==='Назад'&&data.state)return back();
   if(/^\/morning(?:@\w+)?$/.test(text)) {
     if(!user) return send('Сначала /start.');
-    const streaks=await db.streaks(id);
-    return send(morningReport(calculate(streaks,now),now,user.timezone,id,streaks.at(-1)?.start),reportButtons());
+    return morning();
   }
   if(text===RECOVERY_LABEL||A.MENU_LABELS.includes(text)) {
     if(!user)return send('Сначала /start.');
@@ -450,9 +554,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     if(text===A.MENU_LABELS[0])return progress();
     if(text===RECOVERY_LABEL||text===A.MENU_LABELS[1])return health();
     if(text===A.MENU_LABELS[2])return achievements();
-    if(text===A.MENU_LABELS[3])return send(cravingReport(await stats()),buttons(
-      [['✅ Отпустило','craving:passed'],['🚬 Был срыв','lapse']]
-    ));
+    if(text===A.MENU_LABELS[3])return craving();
     return showSettings();
   }
 

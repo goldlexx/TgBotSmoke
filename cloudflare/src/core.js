@@ -1,13 +1,17 @@
 import Decimal from 'decimal.js';
 import { Temporal } from '@js-temporal/polyfill';
 import A from './assets.json' with {type: 'json'};
-import {dailyFact} from './health.js';
-export {healthReport} from './health.js';
+import {dailyFact,healthCards} from './health.js';
 Decimal.set({precision: 28, rounding: Decimal.ROUND_HALF_EVEN});
 export { A };
 export class ValidationError extends Error {}
 export const DEFAULTS={daily:20,price:'250',currency:'RUB',pack:20,minutes:'5',timezone:'Europe/Moscow',report_time:'08:00'};
-export const PRIVACY='Сохраняем Telegram ID и ID чата для ответов, настройки курения, даты серий, время и количество сигарет при записи срыва, достижения и отметки отправки для расчётов и защиты от дублей. Имя, телефон и переписку не сохраняем. Ответы в очереди удаляются после завершения отправки; старые записи очищаются периодически. Удаление: /delete. После удаления остаётся только необратимая метка ID с датой удаления, чтобы старые события не восстановили аккаунт. Резервные копии удаляются владельцем отдельно; история восстановления D1 хранится до 7 дней. Утренний отчёт можно выключить в настройках.';
+export const PRIVACY=[
+  '🔐 <b>Конфиденциальность</b>',
+  'Сохраняем Telegram ID и ID чата для ответов, настройки курения, даты серий, время и количество сигарет при записи срыва, достижения и отметки отправки для расчётов и защиты от дублей. Имя, телефон и переписку не сохраняем.',
+  'Ответы в очереди удаляются после завершения отправки. Старые записи очищаются периодически. Утренний отчёт можно выключить в настройках.',
+  'Удаление: /delete. После удаления остаётся только необратимая метка ID с датой удаления, чтобы старые события не восстановили аккаунт. Резервные копии удаляются владельцем отдельно. История восстановления D1 хранится до 7 дней.'
+].join('\n\n');
 export const milestones = [1,3,7,14,30,60,90,180,365];
 export const esc = v => String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#x27;');
 export const minute = value => Math.floor(new Date(value).getTime()/60000)*60000;
@@ -162,11 +166,11 @@ function goal(seconds) {
     `До рубежа — <b>${left<3600?'меньше часа':compactDuration(left,true)}</b>`].join('\n');
 }
 const series=seconds=>`<b>${compactDuration(seconds,true)} без сигарет</b>`;
-function totals(s,timeLabel='Свободное время') {
+function totals(s) {
   const money=Object.entries(s.money).map(([currency,value])=>`≈${integer(value)} ${esc(currencySymbol(currency))}`).join(' + ');
   return [`🚬 Не выкурено: <b>≈${integer(s.cigarettes)} шт.</b>`,
     ...(money?[`💰 Сэкономлено: <b>${money}</b>`]:[]),
-    `⏳ ${timeLabel}: <b>≈${compactDuration(s.free_minutes.mul(60).toNumber(),true)}</b>`].join('\n');
+    `⏳ Свободное время: <b>≈${compactDuration(s.free_minutes.mul(60).toNumber(),true)}</b>`].join('\n');
 }
 export function morningReport(s,now,zone,id,start,milestone) {
   const localDay=local(now,zone).day;
@@ -180,11 +184,13 @@ export function morningReport(s,now,zone,id,start,milestone) {
     milestone=latest&&local(startTime+latest*day*1000,zone).day===localDay?latest:0;
   }
   const reached=milestone>0&&milestone*day<=s.current_seconds;
-  return ['☀️ <b>Доброе утро!</b>',
+  const fact=dailyFact(ageAtMidnight,localDay,id);
+  const text=['☀️ <b>Доброе утро!</b>',
     ...(reached?[`🏆 <b>${awards[milestone]?.[2]??daysText(milestone)+' без сигарет!'}</b>`]:[]),
     series(s.current_seconds),goal(s.current_seconds),totals(s),
-    `🫁 <b>Факт о здоровье</b>\n${dailyFact(ageAtMidnight,localDay,id)}`,
+    `🫁 <b>Факт о здоровье</b>\n${healthCards[fact][1]}`,
     `💡 <b>Мысль дня</b>\n${esc(thought)}`].join('\n\n');
+  return {text,reply_markup:reportButtons(fact)};
 }
 const awardCount=earned=>`🏆 Достижения: <b>${earned.size} из ${milestones.length}</b>`;
 export function progressReport(s,earned) {
@@ -211,13 +217,10 @@ export function awardsReport(seconds,earned) {
     future.length?`🎁 До следующей награды — <b>${compactDuration(future[0]*day-seconds,true)}</b>`:''
   ].filter(Boolean).join('\n\n');
 }
-export function cravingReport(s) {
-  return `<b>🆘 Хочу закурить</b>\n\n🚭 ${series(s.current_seconds)}\n\n${totals(s,'Освобождено')}\n\n`+
-    '💧 Выпей воды или немного пройдись. Дай себе 5 минут.\n\n<b>Не нужно решать «навсегда». Просто не кури сейчас.</b>';
-}
 export const buttons=(...rows)=>({inline_keyboard:rows.map(row=>row.map(([text,callback_data])=>({text,callback_data})))});
 export const RECOVERY_LABEL='🫁 Восстановление';
-export const reportButtons=()=>buttons([[RECOVERY_LABEL,'report:health'],[A.MENU_LABELS[0],'progress']],[['ℹ️ Как считаем','report:methodology']]);
+const reportButtons=fact=>buttons([[RECOVERY_LABEL,'report:health'],[A.MENU_LABELS[0],'progress']],
+  [['🔬 Подробнее и источники','health:fact:'+fact]],[['ℹ️ Как считаем','report:methodology']]);
 export function methodologyReport(detailed=false) {
   const title='<b>ℹ️ Как считаем</b>';
   if(!detailed)return [
@@ -243,11 +246,4 @@ export const choices=(...labels)=>({
   keyboard:[...(labels.length?[labels.map(text=>({text}))]:[]),[{text:'Отмена'}]],
   resize_keyboard:true,one_time_keyboard:true
 });
-export const settings=()=>buttons(
-  [['🚭 Дата отказа','edit:start']],
-  [['🚬 Привычка','edit:daily'],['📦 Размер пачки','edit:pack']],
-  [['💰 Стоимость','edit:cost'],['⏰ Уведомления','notifications']],
-  [['🌍 Часовой пояс','edit:timezone'],['⏳ Минут на сигарету','edit:minutes']],
-  [['🚬 Отметить срыв','lapse']],[['🗑 Удалить мои данные','delete']]
-);
 export const confirmation=nonce=>buttons([['Подтвердить срыв',`lapse:confirm:${nonce}`],['Отмена','cancel']]);
