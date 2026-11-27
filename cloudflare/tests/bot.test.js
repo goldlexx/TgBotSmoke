@@ -2,8 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {database,now,profile,message,callback} from './helpers.js';
-import {A,parseDate,local,stamp,calculate,compactDuration,morningReport,progressReport,detailedProgressReport,methodologyReport,milestones,menu,RECOVERY_LABEL} from '../src/core.js';
-import {dailyFact,healthCards,healthReport,stages,currentStage} from '../src/health.js';
+import {A,parseDate,local,stamp,calculate,compactDuration,seriesDuration,cigaretteWord,morningReport,progressReport,detailedProgressReport,methodologyReport,milestones,menu,RECOVERY_LABEL} from '../src/core.js';
+import {dailyFact,healthCards,healthReport,stages,currentStage,sourceTitles} from '../src/health.js';
 import {handleUpdate,DeliveryError} from '../src/bot.js';
 import worker,{tick} from '../src/worker.js';
 
@@ -25,7 +25,7 @@ const morning=(streaks,instant=now,milestone=null)=>morningReport(calculate(stre
 
 test('compact morning example has correct local goal, whole estimates and a fact',()=>{
   const seconds=8*86400+4*3600,text=morning([period(seconds)]);
-  assert(text.startsWith('☀️ <b>Доброе утро!</b>\n\n<b>8 дней 4 часа без сигарет</b>\n\n🎯 Следующий рубеж — <b>14 дней</b>\nУчасток: 7 дней → 14 дней\n▰▰▱▱▱▱▱▱▱▱ <b>17%</b>\nДо рубежа — <b>5 дней 20 часов</b>\n\n🚬 Не выкурено: <b>≈163 шт.</b>\n💰 Сэкономлено: <b>≈2 042 ₽</b>\n⏳ Свободное время: <b>≈13 часов 36 минут</b>\n\n🫁 <b>Факт о здоровье</b>\n'+healthCards[dailyFact(seconds,'2026-11-16',42)][1]+'\n\n💡 <b>Мысль дня</b>\n'));
+  assert(text.startsWith('☀️ <b>Доброе утро!</b>\n\n<b>8 дней 4 часа без сигарет</b>\n\n🎯 Следующий рубеж — <b>14 дней</b>\nУчасток: 7 дней → 14 дней\n▰▰▱▱▱▱▱▱▱▱ <b>17%</b>\nДо рубежа — <b>5 дней 20 часов</b>\n\n🚬 Не выкурено: <b>≈163 сигареты</b>\n💰 Сэкономлено: <b>≈2 042 ₽</b>\n⏳ Свободное время: <b>≈13 часов 36 минут</b>\n\n🫁 <b>Факт о здоровье</b>\n'+healthCards[dailyFact(seconds,'2026-11-16',42)][1]+'\n\n💡 <b>Мысль дня</b>\n'));
   assert(A.THOUGHTS.includes(text.split('\n').at(-1)));assert(text.length<700);
 });
 
@@ -66,12 +66,12 @@ test('23-day progress stays compact; detailed statistics keep lifetime estimates
   const headline=progressReport(calculate([current],now),earned);
   assert.match(headline,/🚭 <b>Мой прогресс<\/b>\n\n<b>23 дня без сигарет<\/b>/);
   assert.match(headline,/Участок: 14 дней → 30 дней\n▰▰▰▰▰▰▱▱▱▱ <b>56%<\/b>\nДо рубежа — <b>7 дней<\/b>/);
-  for(const value of ['≈460 шт.','≈5 750 ₽','≈1 день 14 часов','<b>4 из 9</b>'])assert(headline.includes(value),value);
-  assert.doesNotMatch(headline,/Статистический эквивалент жизни|Мои достижения/);
+  for(const value of ['≈460 сигарет','≈5 750 ₽','≈1 день 14 часов','<b>4 из 9</b>'])assert(headline.includes(value),value);
+  assert.doesNotMatch(headline,/Эквивалент времени жизни|Мои достижения/);
   const details=detailedProgressReport(calculate([past,current],now),earned);
   assert.match(details,/Всего без сигарет: <b>25 дней<\/b>/);
   assert.match(details,/≈12 € \+ ≈5 750 ₽/);
-  assert.match(details,/Статистический эквивалент жизни: <b>≈[^<]+<\/b>\nЭто оценка по статистической модели/);
+  assert.match(details,/Эквивалент времени жизни: <b>≈[^<]+<\/b>\nРасчётная оценка на основе исследований/);
   assert.match(details,/Достижения: <b>4 из 9<\/b>\n🌱 Первый день/);
   const short=progressReport(calculate([period(6*3600)],now),new Set());
   assert.match(short,/<b>6 часов без сигарет<\/b>/);
@@ -120,8 +120,8 @@ test('lapse resets series and health, keeps historical totals and currencies wit
   const s=calculate([history,active],now),text=morning([history,active]);
   assert.equal(s.current_seconds,3600);assert.equal(s.total_seconds,2*86400+3600);
   assert.match(text,/1 час без сигарет/);assert.match(text,/Следующий рубеж — <b>1 день/);
-  assert.match(text,/≈41 шт\./);assert.match(text,/≈500 ₽ \+ ≈0 €/);
-  assert.match(healthReport(s.current_seconds,'1 час'),/Текущий период · Первые минуты/);
+  assert.match(text,/≈41 сигарета/);assert.match(text,/≈500 ₽ \+ ≈0 €/);
+  assert.match(healthReport(s.current_seconds,'1 час'),/Текущий период · Около 20 минут/);
   assert.match(morning([period(0,{currency:'KZT'})],now),/0 KZT/);
   assert(!morning([period(86400,{currency:'USD'})],now).includes('₽'));
 });
@@ -129,7 +129,7 @@ test('lapse resets series and health, keeps historical totals and currencies wit
 test('recovery uses substantive periods, specific source records and exact boundaries',()=>{
   for(const [index,[start,label,,keys]] of stages.entries()) {
     assert.equal(currentStage(start),index);
-    if(index)assert.equal(currentStage(start-1),index-1);
+    assert.equal(currentStage(start-1),index-1);
     for(const key of keys)assert.match(healthCards[key][2],/^https:\/\//);
     const text=healthReport(start,compactDuration(start,true));
     assert(text.includes(label));assert(text.includes(healthCards[keys[0]][1]));
@@ -140,6 +140,12 @@ test('recovery uses substantive periods, specific source records and exact bound
     const text=healthReport(sec,compactDuration(sec,true));
     assert.match(text,/Текущий период/);assert.doesNotMatch(text,/Все ориентиры пройдены|<a href=/);
   }
+  const at13=healthReport(13*86400,'13 дней');
+  assert.match(at13,/Вкус[\s\S]+Обоняние[\s\S]+Дыхание[\s\S]+Ближайший ориентир · 2–12 недель/);
+  assert.doesNotMatch(at13,/🌙 Сон/);
+  assert(stages[2][3].includes('sleep'));
+  assert(stages.every(stage=>!stage[3].includes('smoke')));
+  for(const [,,url,note] of Object.values(healthCards))assert(sourceTitles[url]&&note);
   const method=methodologyReport(true);assert(method.length<4096);
   for(const source of [A.ADDICTION,A.MODEL_NOTE])assert(method.includes(source));
   assert.match(method,/86 400/);assert.match(method,/Промежутки срыва исключены/);
@@ -175,10 +181,10 @@ test('scheduled morning uses local time and inline buttons while detailed progre
   assert.deepEqual(calls[0].body.reply_markup,report.reply_markup);assert.equal(calls[0].body.text,report.text);
   assert.equal((await db.one('SELECT * FROM reports WHERE user_id=1 AND local_date=?','2026-11-16')).status,'sent');
   await handleUpdate({message:{chat:{id:1,type:'private'},from:{id:1},text:A.MENU_LABELS[0]}},db,env,now,api);
-  assert.doesNotMatch(calls.at(-1).body.text,/Статистический эквивалент жизни/);
+  assert.doesNotMatch(calls.at(-1).body.text,/Эквивалент времени жизни/);
   assert.equal(calls.at(-1).body.reply_markup.inline_keyboard[0][0].callback_data,'progress:details');
   await handleUpdate(callback(1,2,'progress:details'),db,env,now,api);
-  assert.match(calls.at(-1).body.text,/Статистический эквивалент жизни/);
+  assert.match(calls.at(-1).body.text,/Эквивалент времени жизни/);
 });
 test('minute accuracy, invalid dates, future, DST and zones',()=>{
   assert.equal(parseDate('Сейчас','Europe/Moscow',now),parseDate('16.11.2026 12:00','Europe/Moscow',now));
@@ -307,6 +313,25 @@ function conversation(db,env,id,time=now) {
   return {send,cb,click:label=>cb(button(label)),button,last,replies};
 }
 
+test('cigarettes agree with the rounded number and all series views use days and hours',async()=>{
+  for(const [count,word] of [[0,'сигарет'],[1,'сигарета'],[2,'сигареты'],[4,'сигареты'],[5,'сигарет'],[11,'сигарет'],[12,'сигарет'],[14,'сигарет'],[21,'сигарета'],[261,'сигарета']]) {
+    assert.equal(cigaretteWord(count),word);
+  }
+  assert.equal(seriesDuration(16*60),'16 минут');
+  assert.equal(seriesDuration(3600+16*60),'1 час');
+  const {db,env}=database(),id=594;
+  await db.register(id,id,period(13*86400+70*60),now);
+  const chat=conversation(db,env,id),duration=/13 дней 1 час/;
+  await chat.send(A.MENU_LABELS[0]);assert.match(chat.last().text,/≈261 сигарета/);assert.match(chat.last().text,duration);
+  await chat.click('📊 Подробная статистика');assert.equal(chat.last().text.match(/13 дней 1 час/g).length,2);
+  await chat.send('/morning');assert.match(chat.last().text,duration);
+  await chat.send(RECOVERY_LABEL);assert.match(chat.last().text,duration);
+  await chat.cb('history');assert.match(chat.last().text,duration);
+  await chat.click('Серии без сигарет');assert.match(chat.last().text,duration);
+  await chat.send(A.MENU_LABELS[3]);await chat.click('😟 Стресс');assert.match(chat.last().text,duration);
+  await chat.send(A.MENU_LABELS[4]);assert.match(chat.last().text,/20 сигарет в день/);
+});
+
 test('new and legacy menu and report buttons route to real screens',async()=>{
   const {db,env}=database();await db.register(590,590,profile,now);
   const chat=conversation(db,env,590);
@@ -337,11 +362,12 @@ test('recovery opens future stages and returns from sources to the exact stage a
   await chat.send(RECOVERY_LABEL);assert.match(chat.last().text,/23 дня без сигарет[\s\S]+4-я неделя[\s\S]+Кровообращение/);
   await chat.click('📅 Все этапы восстановления');assert.match(chat.last().text,/Пройдено[\s\S]+Страница 1 из 3/);
   await chat.click('Далее →');assert.match(chat.last().text,/📍 Сейчас[\s\S]+⏳ Впереди[\s\S]+Страница 2 из 3/);
-  await chat.click('Далее →');await chat.click('10 лет и дальше');
+  await chat.click('Далее →');await chat.click('10 лет и далее');
   await chat.click('Источник · 🫁 Риск рака лёгкого');assert(chat.last().text.includes(healthCards.lung[2]));
-  await chat.click('Назад');assert.match(chat.last().text,/10 лет и дальше/);
+  assert.match(chat.last().text,/10–15 лет[\s\S]+популяционная оценка[\s\S]+CDC · Польза отказа от курения/);
+  await chat.click('Назад');assert.match(chat.last().text,/10 лет и далее/);
   await chat.click('Назад');assert.match(chat.last().text,/Страница 3 из 3/);
-  await chat.click('Назад');assert.match(chat.last().text,/Восстановление организма/);
+  await chat.click('К восстановлению');assert.match(chat.last().text,/Восстановление организма/);
   await chat.send('/morning');const report=chat.last();
   const fact=report.reply_markup.inline_keyboard.flat().find(button=>button.callback_data.startsWith('health:fact:'));
   const card=healthCards[fact.callback_data.split(':').at(-1)];
@@ -353,7 +379,7 @@ test('craving categories cycle through 40 unique cards without writes or automat
   const {db,env,metrics}=database();await db.register(592,592,profile,now);
   const chat=conversation(db,env,592),seen=new Set();metrics.sql.length=0;
   await chat.send(A.MENU_LABELS[3]);
-  for(const label of ['☕ Привычный ритуал','😟 Стресс','👥 В компании','🔄 Скука или привычка']) {
+  for(const label of ['☕ Привычный ритуал','😟 Стресс','👥 В компании','🔄 Скука и безделье']) {
     await chat.click(label);const start=chat.last().text;
     for(let i=0;i<10;i++) {
       assert(chat.last().text.includes(label));assert(!seen.has(chat.last().text));
@@ -380,7 +406,7 @@ test('settings groups link to history, cancel edits and keep manual reports and 
   await chat.click('Назад');await chat.click('🔔 Уведомления');
   assert.match(chat.last().text,/Предпочтительное время: 08:00/);assert.doesNotMatch(chat.last().text,/Следующий отчёт/);
   await chat.click('Открыть отчёт');assert.match(chat.last().text,/Доброе утро/);
-  await chat.click('🔬 Подробнее и источники');assert.match(chat.last().text,/Открыть источник/);
+  await chat.click('🔬 Подробнее и источники');assert.match(chat.last().text,/<a href="https:\/\//);
   await chat.click('Назад');await chat.click('Назад');
   await chat.click('🕒 Изменить время');await chat.click('07:00');await chat.click('🔔 Уведомления');
   assert.match(chat.last().text,/выключена[\s\S]+Предпочтительное время: 07:00/);

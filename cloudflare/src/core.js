@@ -118,6 +118,7 @@ export function calculate(streaks,now) {
 }
 const integer = n => n.toFixed(0,Decimal.ROUND_HALF_UP).replace(/\B(?=(\d{3})+(?!\d))/g,' ');
 const plural = (n,one,few,many) => n%10===1&&n%100!==11?one:n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?few:many;
+export const cigaretteWord=n=>plural(n,'сигарета','сигареты','сигарет');
 export function compactDuration(seconds,words=false) {
   const minutes=Math.floor(Math.max(0,seconds)/60),days=Math.floor(minutes/1440),hours=Math.floor(minutes%1440/60);
   const parts=[];
@@ -126,6 +127,7 @@ export function compactDuration(seconds,words=false) {
   if(!days&&minutes%60) parts.push(`${minutes%60} ${words?plural(minutes%60,'минута','минуты','минут'):'мин.'}`);
   return parts.join(' ')||'меньше минуты';
 }
+export const seriesDuration=seconds=>compactDuration(seconds>=3600?Math.floor(seconds/3600)*3600:seconds,true);
 
 const day=86400;
 const awards={
@@ -165,10 +167,11 @@ function goal(seconds) {
     bar(percent,cells),
     `До рубежа — <b>${left<3600?'меньше часа':compactDuration(left,true)}</b>`].join('\n');
 }
-const series=seconds=>`<b>${compactDuration(seconds,true)} без сигарет</b>`;
+const series=seconds=>`<b>${seriesDuration(seconds)} без сигарет</b>`;
 function totals(s) {
   const money=Object.entries(s.money).map(([currency,value])=>`≈${integer(value)} ${esc(currencySymbol(currency))}`).join(' + ');
-  return [`🚬 Не выкурено: <b>≈${integer(s.cigarettes)} шт.</b>`,
+  const cigarettes=s.cigarettes.toDecimalPlaces(0,Decimal.ROUND_HALF_UP);
+  return [`🚬 Не выкурено: <b>≈${integer(cigarettes)} ${cigaretteWord(cigarettes.mod(100).toNumber())}</b>`,
     ...(money?[`💰 Сэкономлено: <b>${money}</b>`]:[]),
     `⏳ Свободное время: <b>≈${compactDuration(s.free_minutes.mul(60).toNumber(),true)}</b>`].join('\n');
 }
@@ -200,9 +203,9 @@ export function detailedProgressReport(s,earned) {
   const life=s.life_minutes.mul(60).toDecimalPlaces(0,Decimal.ROUND_HALF_UP).toNumber();
   const collection=milestones.filter(d=>earned.has(d)).map(d=>`${awards[d][0]} ${awards[d][1]}`);
   return ['📊 <b>Подробная статистика</b>',
-    `Текущая серия: ${series(s.current_seconds)}\n📅 Всего без сигарет: <b>${compactDuration(s.total_seconds,true)}</b>`,
+    `Текущая серия: ${series(s.current_seconds)}\n📅 Всего без сигарет: <b>${seriesDuration(s.total_seconds)}</b>`,
     totals(s),
-    `❤️ Статистический эквивалент жизни: <b>≈${compactDuration(life,true)}</b>\nЭто оценка по статистической модели. Она не предсказывает продолжительность твоей жизни.`,
+    `❤️ Эквивалент времени жизни: <b>≈${compactDuration(life,true)}</b>\nРасчётная оценка на основе исследований. Это не прогноз продолжительности твоей жизни.`,
     [awardCount(earned),...collection].join('\n')].join('\n\n');
 }
 export function awardsReport(seconds,earned) {

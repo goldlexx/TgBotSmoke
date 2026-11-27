@@ -1,8 +1,8 @@
-import {compactDuration,dateLabel,esc,ValidationError,zoneLabel} from './core.js';
+import {seriesDuration,dateLabel,esc,ValidationError,zoneLabel} from './core.js';
 
 const habitFields=['daily','price','currency','pack','minutes'];
 const date=(value,zone)=>dateLabel(value,zone).replace(' ', ', ');
-const elapsed=(start,end)=>compactDuration(Math.max(0,(new Date(end)-new Date(start))/1000),true);
+const elapsed=(start,end)=>seriesDuration(Math.max(0,(new Date(end)-new Date(start))/1000));
 export function historyTarget(rows,kind,key) {
   const index=rows.findIndex(row=>row.id===key);
   const first=rows[index],second=rows[index+1];

@@ -1,9 +1,9 @@
 import {
-  A,esc,minute,stamp,local,parseDate,parseField,numeric,calculate,morningReport,compactDuration,
+  A,esc,minute,stamp,local,parseDate,parseField,numeric,calculate,morningReport,seriesDuration,cigaretteWord,
   methodologyReport,progressReport,detailedProgressReport,awardsReport,menu,buttons,
   dateLabel,zoneLabel,cities,currencySymbol,DEFAULTS,PRIVACY,RECOVERY_LABEL,ValidationError
 } from './core.js';
-import {healthReport,healthCards,stages,currentStage,healthNote,stageCards,generalSources} from './health.js';
+import {healthReport,healthCards,stages,currentStage,healthNote,stageCards,generalSources,sourceTitles} from './health.js';
 import {cravingCategories} from './craving.js';
 import {historyReport,seriesReport,episodeReport,episodeFields,historyTarget,historySnapshot,validateHistoryChange} from './history.js';
 export class DeliveryError extends Error {constructor(code,retry=0){super(`Telegram ${code}`);this.code=code;this.retry=retry;}}
@@ -47,7 +47,7 @@ function parseZone(text,now) {
   return parseField('timezone',named||(candidates.length===1?candidates[0]:text),DEFAULTS.timezone,now);
 }
 const habitSummary=user=>[
-  `🚬 Прежняя привычка: <b>${user.daily} шт. в день</b>`,
+  `🚬 Прежняя привычка: <b>${user.daily} ${cigaretteWord(user.daily)} в день</b>`,
   `💰 Стоимость пачки: <b>${esc(user.price)} ${esc(currencySymbol(user.currency))}</b>`,
   `📦 Сигарет в пачке: <b>${user.pack}</b>`,
   `⏳ Продолжительность перекура: <b>${esc(user.minutes)} мин.</b>`
@@ -99,7 +99,7 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     if(!Object.hasOwn(cravingCategories,key))return craving();
     const [label,tips]=cravingCategories[key];
     if(index>=tips.length)return craving();
-    return send(`<b>${label}</b>\n\n<b>Попробуй сейчас</b>\n${tips[index]}\n\n🚭 <b>${compactDuration((await stats()).current_seconds,true)} без сигарет</b>`,buttons(
+    return send(`<b>${label}</b>\n\n<b>Попробуй сейчас</b>\n${tips[index]}\n\n🚭 <b>${seriesDuration((await stats()).current_seconds)} без сигарет</b>`,buttons(
       [reliefLink,['💡 Другой совет',`craving:tip:${key}:${(index+1)%tips.length}`]],lapseLink,[['Назад','craving']]));
   };
   const showHistory=async(returnTo='progress')=>{
@@ -182,11 +182,10 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   };
   const healthSize=3;
   const stagesLink=[['📅 Все этапы восстановления','health:page:0']];
-  const healthBack=[['Назад','report:health']];
   const health=async()=>{
     const seconds=(await stats()).current_seconds;
-    return send(healthReport(seconds,compactDuration(seconds,true)),buttons(stagesLink,
-      [['🔬 Подробнее и источники',`health:stage:${currentStage(seconds)}`]],[['Главное меню','home']]));
+    return send(healthReport(seconds,seriesDuration(seconds)),buttons(stagesLink,
+      [['🔬 Подробнее и источники',`health:stage:${Math.max(0,currentStage(seconds))}`]],[['Главное меню','home']]));
   };
   const healthPage=async page=>{
     const last=Math.ceil(stages.length/healthSize)-1;
@@ -196,7 +195,8 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
     const summaries=items.map(([,label,text],i)=>`${offset+i<index?'✅ Пройдено':offset+i===index?'📍 Сейчас':'⏳ Впереди'} · <b>${label}</b>\n${text}`);
     return send(['📅 <b>Все этапы восстановления</b>',...summaries,`Страница ${page+1} из ${last+1}`,healthNote].join('\n\n'),buttons(
       ...items.map(([,label],i)=>[[label,`health:stage:${offset+i}`]]),
-      [...(page?[['← Назад',`health:page:${page-1}`]]:[]),...(page<last?[['Далее →',`health:page:${page+1}`]]:[])],healthBack));
+      [...(page?[['← Назад',`health:page:${page-1}`]]:[]),...(page<last?[['Далее →',`health:page:${page+1}`]]:[])],
+      [[page?'К восстановлению':'Назад','report:health']]));
   };
   const healthStage=index=>{
     const stage=stages[index];
@@ -207,8 +207,9 @@ export async function handleUpdate(update,db,env,now=Date.now(),api=telegram) {
   };
   const healthSource=(key,index,fromNotifications=false)=>{
     if(!Object.hasOwn(healthCards,key)||(index!==undefined&&!stages[index]?.[3].includes(key)))return health();
-    const [label,text,url,note]=healthCards[key];
-    return send([`🔬 <b>${label}</b>`,text,note,`<a href="${url}">Открыть источник</a>`].filter(Boolean).join('\n\n'),
+    const [label,text,url,note,range]=healthCards[key];
+    return send([`🔬 <b>${label}</b>`,text,range&&`🕒 <b>Ориентир:</b> ${range}`,note,
+      `<a href="${url}">${sourceTitles[url]}</a>`].filter(Boolean).join('\n\n'),
       buttons([['Назад',index===undefined?(fromNotifications?'morning:notifications':'morning'):`health:stage:${index}`]]));
   };
   const settingsBack=[['Назад','settings']];
